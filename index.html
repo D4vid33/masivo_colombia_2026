@@ -93,18 +93,21 @@
                         recurrencia: parseFloat(item.recurrencia) || 0,
                         cuentaViva: parseInt(item.cuentaViva) || 0,
                         definicion: String(
-                            getFieldValue(item, [
-                                "definicion",
-                                "Definicion",
-                                "Definición",
-                                "DEFINICION",
-                                "DEFINICIÓN",
-                                "columnaV",
-                                "Columna V",
-                                "V",
-                                "v"
-                            ]) ?? "#N/D"
-                        ).trim() || "#N/D"
+    getFieldValue(item, [
+        "definicion",
+        "Definicion",
+        "Definición",
+        "DEFINICION",
+        "DEFINICIÓN",
+        "columnaV",
+        "Columna V",
+        "V",
+        "v",
+        "actividad",
+        "Actividad",
+        "ACTIVIDAD"
+    ]) ?? "#N/D"
+).trim() || "#N/D"
                     }));
                     setData(normalized);
                 } catch (e) { console.error("Error fetching:", e); } finally { setLoading(false); }
@@ -505,4 +508,5 @@
     </script>
 </body>
 </html>
+
 
