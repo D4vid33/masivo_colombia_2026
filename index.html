@@ -21,13 +21,9 @@
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
-        /* Animación para el cargando */
         .spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid #e2e8f0;
-            border-top: 4px solid #3b82f6;
-            border-radius: 50%;
+            width: 40px; height: 40px; border: 4px solid #e2e8f0;
+            border-top: 4px solid #3b82f6; border-radius: 50%;
             animation: spin 1s linear infinite;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
@@ -40,8 +36,8 @@
         const { useState, useEffect, useMemo } = React;
         const { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } = Recharts;
 
-        // URL DE TU GOOGLE SCRIPT (API)
-        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwg5UFngW8Bf_eExyUhA1lq3BxUMlBVRZEvZanSbGXIyLEP3V8rKdFhlZxBDaVpN6wQ/exec"; 
+        // URL DE TU GOOGLE SCRIPT (Integrada por David)
+        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzCmuUHimtdhw-So4U5wxF8i2GnoVateqq-udMQbQs7cCnJ2J-GMOXxnKQcVsTf_VDC/exec"; 
 
         const App = () => {
             const [data, setData] = useState([]);
@@ -51,50 +47,33 @@
             const [filterEstado, setFilterEstado] = useState('Todos');
             const [filterConsultor, setFilterConsultor] = useState('Todos');
 
-            // Carga inicial
             useEffect(() => {
-                const init = async () => {
-                    await fetchData();
-                    if (window.lucide) window.lucide.createIcons();
-                };
-                init();
+                fetchData();
             }, []);
 
-            // Actualizar iconos cada vez que cambie la data o filtros
             useEffect(() => {
                 if (window.lucide) window.lucide.createIcons();
             }, [data, searchTerm, filterEstado, filterConsultor]);
 
             const fetchData = async () => {
-                if (!GOOGLE_SCRIPT_URL) {
-                    // Datos de ejemplo por si no hay URL
-                    setData([
-                        { id: 'CO211493', nombre: 'A & P Ingeniería', valorMensual: 198031.51, recurrencia: 196070.8, cuentaViva: 1, propietario: 'Fabian Alberto Beltran', prioridad: false, actividad: '' },
-                        { id: 'CO590524', nombre: 'Sergio Pérez VIP', valorMensual: 500000.00, recurrencia: 110000.0, cuentaViva: 1, propietario: 'Sandra Patricia Florez', prioridad: true, actividad: 'Llamada urgente' },
-                        { id: 'CO211251', nombre: 'Seguros A.P.', valorMensual: 134198.68, recurrencia: 133400, cuentaViva: 2, propietario: 'Reinel Calvo', prioridad: false, actividad: '' }
-                    ]);
-                    setLoading(false);
-                    return;
-                }
                 try {
+                    setLoading(true);
                     const response = await fetch(GOOGLE_SCRIPT_URL);
                     const json = await response.json();
                     setData(json);
                 } catch (e) { 
-                    console.error("Error cargando:", e);
+                    console.error("Error cargando data:", e);
                 } finally { 
                     setLoading(false); 
                 }
             };
 
             const saveToSheet = async (item) => {
-                if (!GOOGLE_SCRIPT_URL) return;
                 setSaving(true);
                 try {
                     await fetch(GOOGLE_SCRIPT_URL, {
                         method: 'POST',
                         mode: 'no-cors',
-                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(item)
                     });
                 } catch (e) { console.error(e); }
@@ -115,9 +94,9 @@
 
             const VIP_THRESHOLD = 200000;
             const statusConfig = {
-                1: { text: 'Vivo', color: 'bg-emerald-100 text-emerald-700', icon: 'activity' },
-                2: { text: 'Pausado', color: 'bg-amber-100 text-amber-700', icon: 'clock' },
-                0: { text: 'Cerrado', color: 'bg-slate-100 text-slate-500', icon: 'check-circle' }
+                1: { text: 'Vivo', color: 'bg-emerald-100 text-emerald-700' },
+                2: { text: 'Pausado', color: 'bg-amber-100 text-amber-700' },
+                0: { text: 'Cerrado', color: 'bg-slate-100 text-slate-500' }
             };
 
             const consultores = useMemo(() => ['Todos', ...new Set(data.map(item => item.propietario))], [data]);
@@ -137,34 +116,34 @@
                     d.prioridad || 
                     (d.cuentaViva === 1 && d.recurrencia === 0) || 
                     (d.valorMensual >= VIP_THRESHOLD && d.cuentaViva !== 0)
-                );
+                ).slice(0, 10);
             }, [filteredData]);
 
             if (loading) return (
                 <div className="min-h-screen flex flex-col items-center justify-center">
                     <div className="spinner mb-4"></div>
-                    <p className="font-bold text-slate-500">Iniciando CRM de David...</p>
+                    <p className="font-bold text-slate-500 italic">Sincronizando con Google Sheets de David...</p>
                 </div>
             );
 
             return (
                 <div className="p-4 md:p-8 max-w-7xl mx-auto">
                     {saving && (
-                        <div className="fixed top-4 right-4 bg-white shadow-2xl border border-blue-100 px-6 py-3 rounded-full flex items-center gap-3 z-50">
-                            <i data-lucide="save" className="w-4 h-4 text-blue-500 animate-bounce"></i>
-                            <span className="text-[10px] font-black uppercase text-slate-600">Sincronizando Excel...</span>
+                        <div className="fixed top-4 right-4 bg-white shadow-2xl border border-blue-100 px-6 py-3 rounded-full flex items-center gap-3 z-50 animate-pulse">
+                            <i data-lucide="refresh-cw" className="w-4 h-4 text-blue-500 animate-spin"></i>
+                            <span className="text-[10px] font-black uppercase text-slate-600 tracking-tighter">Guardando en Excel...</span>
                         </div>
                     )}
 
                     <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-10">
                         <div>
                             <h1 className="text-3xl font-extrabold text-slate-800 tracking-tight flex items-center gap-3">
-                                <i data-lucide="layout-dashboard" className="text-blue-500"></i>
-                                CRM Hub Cloud
+                                <i data-lucide="zap" className="text-blue-600 fill-blue-600"></i>
+                                CRM ESTRATÉGICO
                             </h1>
-                            <p className="text-slate-400 font-medium">David • Gestión de Clientes VIP</p>
+                            <p className="text-slate-400 font-medium">David • Panel de Control de Ventas</p>
                         </div>
-                        <div className="flex gap-2">
+                        <div className="flex flex-wrap gap-2">
                             <div className="bg-white p-2 rounded-xl shadow-sm border border-slate-100 flex items-center px-3">
                                 <i data-lucide="users" className="w-3 h-3 text-slate-400 mr-2"></i>
                                 <select value={filterConsultor} onChange={(e)=>setFilterConsultor(e.target.value)} className="bg-transparent text-[11px] font-bold outline-none">
@@ -174,7 +153,7 @@
                             <div className="bg-white p-2 rounded-xl shadow-sm border border-slate-100 flex items-center px-3">
                                 <i data-lucide="filter" className="w-3 h-3 text-slate-400 mr-2"></i>
                                 <select value={filterEstado} onChange={(e)=>setFilterEstado(e.target.value)} className="bg-transparent text-[11px] font-bold outline-none">
-                                    <option value="Todos">Todos</option>
+                                    <option value="Todos">Todos los Estados</option>
                                     <option value="Vivo">Vivos</option>
                                     <option value="Pausado">Pausados</option>
                                     <option value="Cerrado">Cerrados</option>
@@ -185,11 +164,11 @@
 
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                         <div className="lg:col-span-2 space-y-4">
-                            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-3">
+                            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-3 focus-within:ring-2 ring-blue-500/20 transition-all">
                                 <i data-lucide="search" className="w-4 h-4 text-slate-300"></i>
                                 <input 
                                     type="text" 
-                                    placeholder="Buscar por nombre de cliente..." 
+                                    placeholder="Buscar por cliente o ID..." 
                                     className="w-full bg-transparent text-sm outline-none"
                                     value={searchTerm}
                                     onChange={(e)=>setSearchTerm(e.target.value)}
@@ -197,87 +176,98 @@
                             </div>
 
                             <div className="bg-white rounded-[2.5rem] shadow-sm border border-slate-100 overflow-hidden">
-                                <table className="w-full text-left text-sm">
-                                    <thead className="bg-slate-50/50 border-b border-slate-100">
-                                        <tr>
-                                            <th className="p-5 font-bold text-slate-400 uppercase text-[9px] w-16 text-center">Fijar</th>
-                                            <th className="p-5 font-bold text-slate-400 uppercase text-[9px]">Cuenta / Análisis</th>
-                                            <th className="p-5 font-bold text-slate-400 uppercase text-[9px] text-right">Monto K</th>
-                                            <th className="p-5 font-bold text-slate-400 uppercase text-[9px] text-center">Estado</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {filteredData.map(item => (
-                                            <tr key={item.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-all">
-                                                <td className="p-5 text-center">
-                                                    <button onClick={() => updateItem(item.id, { prioridad: !item.prioridad })}>
-                                                        <i data-lucide="star" className={`w-5 h-5 ${item.prioridad ? 'fill-amber-400 text-amber-400' : 'text-slate-200'}`}></i>
-                                                    </button>
-                                                </td>
-                                                <td className="p-5">
-                                                    <div className="font-bold text-slate-800 flex items-center gap-2">
-                                                        {item.nombre}
-                                                        {item.valorMensual >= VIP_THRESHOLD && <i data-lucide="gem" className="w-3 h-3 text-indigo-500"></i>}
-                                                    </div>
-                                                    <input 
-                                                        type="text" 
-                                                        defaultValue={item.actividad}
-                                                        onBlur={(e) => updateItem(item.id, { actividad: e.target.value })}
-                                                        className="block w-full text-[11px] text-blue-500 bg-transparent outline-none italic mt-1"
-                                                        placeholder="Agregar nota de gestión..."
-                                                    />
-                                                </td>
-                                                <td className="p-5 text-right font-bold text-slate-700">
-                                                    <input 
-                                                        type="number" 
-                                                        defaultValue={item.recurrencia}
-                                                        onBlur={(e) => updateItem(item.id, { recurrencia: parseFloat(e.target.value) })}
-                                                        className="w-24 text-right bg-slate-50 rounded px-2 py-1 outline-none focus:ring-1 ring-blue-100"
-                                                    />
-                                                </td>
-                                                <td className="p-5 text-center">
-                                                    <button 
-                                                        onClick={() => {
-                                                            const next = item.cuentaViva === 1 ? 2 : item.cuentaViva === 2 ? 0 : 1;
-                                                            updateItem(item.id, { cuentaViva: next });
-                                                        }}
-                                                        className={`w-28 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all ${statusConfig[item.cuentaViva].color}`}
-                                                    >
-                                                        {statusConfig[item.cuentaViva].text}
-                                                    </button>
-                                                </td>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-sm">
+                                        <thead className="bg-slate-50/50 border-b border-slate-100">
+                                            <tr>
+                                                <th className="p-5 font-bold text-slate-400 uppercase text-[9px] w-16 text-center">Fijar</th>
+                                                <th className="p-5 font-bold text-slate-400 uppercase text-[9px]">Cuenta / Gestión</th>
+                                                <th className="p-5 font-bold text-slate-400 uppercase text-[9px] text-right">Monto K</th>
+                                                <th className="p-5 font-bold text-slate-400 uppercase text-[9px] text-center">Estado</th>
                                             </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
+                                        </thead>
+                                        <tbody>
+                                            {filteredData.map(item => (
+                                                <tr key={item.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-all">
+                                                    <td className="p-5 text-center">
+                                                        <button onClick={() => updateItem(item.id, { prioridad: !item.prioridad })}>
+                                                            <i data-lucide="star" className={`w-5 h-5 ${item.prioridad ? 'fill-amber-400 text-amber-400' : 'text-slate-200'}`}></i>
+                                                        </button>
+                                                    </td>
+                                                    <td className="p-5">
+                                                        <div className="font-bold text-slate-800 flex items-center gap-2">
+                                                            {item.nombre}
+                                                            {item.valorMensual >= VIP_THRESHOLD && <span className="bg-indigo-100 text-indigo-600 text-[8px] px-1.5 py-0.5 rounded font-black">VIP</span>}
+                                                        </div>
+                                                        <input 
+                                                            type="text" 
+                                                            defaultValue={item.actividad}
+                                                            onBlur={(e) => updateItem(item.id, { actividad: e.target.value })}
+                                                            className="block w-full text-[11px] text-blue-500 bg-transparent outline-none italic mt-1 border-b border-transparent focus:border-blue-200"
+                                                            placeholder="Agregar nota de gestión..."
+                                                        />
+                                                    </td>
+                                                    <td className="p-5 text-right font-bold text-slate-700">
+                                                        <div className="flex items-center justify-end gap-1">
+                                                            <span className="text-slate-300">$</span>
+                                                            <input 
+                                                                type="number" 
+                                                                defaultValue={item.recurrencia}
+                                                                onBlur={(e) => updateItem(item.id, { recurrencia: parseFloat(e.target.value) })}
+                                                                className="w-20 text-right bg-slate-50 rounded px-2 py-1 outline-none font-bold"
+                                                            />
+                                                        </div>
+                                                    </td>
+                                                    <td className="p-5 text-center">
+                                                        <button 
+                                                            onClick={() => {
+                                                                const next = item.cuentaViva === 1 ? 2 : item.cuentaViva === 2 ? 0 : 1;
+                                                                updateItem(item.id, { cuentaViva: next });
+                                                            }}
+                                                            className={`w-24 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all ${statusConfig[item.cuentaViva]?.color || 'bg-slate-100 text-slate-400'}`}
+                                                        >
+                                                            {statusConfig[item.cuentaViva]?.text || 'Desconocido'}
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
 
-                        <div className="bg-slate-900 rounded-[3rem] p-8 text-white min-h-[500px] shadow-2xl">
+                        <div className="bg-slate-900 rounded-[3rem] p-8 text-white shadow-2xl h-fit sticky top-8">
                             <h3 className="text-xl font-bold mb-6 flex items-center gap-3">
-                                <i data-lucide="zap" className="text-amber-400"></i>
-                                Plan de Acción
+                                <i data-lucide="flame" className="text-orange-500 fill-orange-500"></i>
+                                Acciones Críticas
                             </h3>
-                            <div className="space-y-4 max-h-[600px] overflow-y-auto custom-scrollbar pr-2">
+                            <div className="space-y-4 max-h-[500px] overflow-y-auto custom-scrollbar pr-2">
                                 {planDelDia.length === 0 ? (
-                                    <p className="text-slate-500 text-sm italic">No hay acciones urgentes pendientes.</p>
+                                    <p className="text-slate-500 text-sm italic">Sin alertas para hoy.</p>
                                 ) : (
                                     planDelDia.map(p => (
-                                        <div key={p.id} className="p-5 rounded-[1.8rem] bg-white/5 border border-white/10 hover:border-blue-500/50 transition-all cursor-default">
+                                        <div key={p.id} className="p-5 rounded-[2rem] bg-white/5 border border-white/10 hover:border-blue-500/50 transition-all">
                                             <div className="flex justify-between items-start mb-2">
                                                 <p className="text-xs font-bold text-blue-300 truncate w-4/5">{p.nombre}</p>
-                                                {p.valorMensual >= VIP_THRESHOLD && <i data-lucide="shield-check" className="w-3 h-3 text-indigo-400"></i>}
+                                                <i data-lucide="chevron-right" className="w-3 h-3 text-slate-600"></i>
                                             </div>
-                                            <p className="text-[10px] text-slate-400 leading-relaxed italic mb-4">
-                                                {p.actividad || "🚨 Pendiente gestión estratégica"}
+                                            <p className="text-[10px] text-slate-400 leading-relaxed italic mb-3">
+                                                {p.actividad || "Sin notas registradas..."}
                                             </p>
-                                            <div className="flex justify-between items-center text-[9px] font-black tracking-widest text-slate-500 uppercase">
+                                            <div className="flex justify-between items-center text-[9px] font-black tracking-widest text-slate-500 uppercase border-t border-white/5 pt-3">
                                                 <span>{p.propietario.split(' ')[0]}</span>
-                                                <span className="text-emerald-400 text-xs">${p.valorMensual.toLocaleString()}</span>
+                                                <span className="text-emerald-400 text-xs font-bold">${p.valorMensual.toLocaleString()}</span>
                                             </div>
                                         </div>
                                     ))
                                 )}
+                            </div>
+                            <div className="mt-8 pt-6 border-t border-white/10">
+                                <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 uppercase">
+                                    <span>Total Filtrado</span>
+                                    <span className="text-white">${filteredData.reduce((acc, curr) => acc + curr.valorMensual, 0).toLocaleString()}</span>
+                                </div>
                             </div>
                         </div>
                     </div>
