@@ -510,7 +510,10 @@
             };
 
             const propietariosDisponibles = useMemo(() => {
-                const unique = [...new Set(data.map(d => d.propietario))].filter(Boolean).sort();
+                const unique = [...new Set(data.map(d => d.propietario))]
+                    .filter(Boolean)
+                    .filter(owner => owner !== MASTER_USER)
+                    .sort();
                 return [MASTER_USER, ...unique];
             }, [data]);
 
