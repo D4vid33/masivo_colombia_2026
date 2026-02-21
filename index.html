@@ -142,7 +142,7 @@
 
             const getNivel = (item) => {
                 if (item.prioridad === true) return "Urgente";
-                if (item.cuentaViva === 1 && (item.recurrencia === 0 || item.recurrencia === 2)) return "Critico";
+                if (item.cuentaViva === 2 && (item.recurrencia === 0 || item.recurrencia === 2)) return "Critico";
                 if (item.cuentaViva === 1 && item.recurrencia < (item.valorMensual * 0.5)) return "Alerta";
                 return "Normal";
             };
@@ -508,6 +508,7 @@
     </script>
 </body>
 </html>
+
 
 
 
