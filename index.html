@@ -39,6 +39,342 @@
 
         const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzwww86Gt6W2jVD1NCULUmwTtyLpPL_s257ujDYy93aUCvwVQirwhGESefEJprG5ZhW/exec";
         const MASTER_USER = "Master";
+        const DEFAULT_PRIORITY_KEYWORDS = ["flujo comercial", "stock"];
+        const DEFAULT_PRIORITY_LABEL = "Prioridad";
+        const DEFAULT_PRIORITY_COLOR = "#3b82f6";
+        const STORAGE_KEYS = {
+            autoPriority: "crm_auto_priority_keywords",
+            visualConfig: "crm_priority_visual_config"
+        };
+        const DEFINICION_CANDIDATES = [
+            "definicion",
+            "Definicion",
+            "Definición",
+            "DEFINICION",
+            "DEFINICIÓN",
+            "columnaV",
+            "Columna V",
+            "V",
+            "v",
+            "actividad",
+            "Actividad",
+            "ACTIVIDAD"
+        ];
+
+        const normalizeKey = (key) => String(key || "")
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-zA-Z0-9]/g, "")
+            .toLowerCase();
+
+        const getFieldValue = (obj, candidates) => {
+            if (!obj || typeof obj !== "object") return undefined;
+
+            for (const key of candidates) {
+                if (Object.prototype.hasOwnProperty.call(obj, key) && obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
+                    return obj[key];
+                }
+            }
+
+            const normalizedEntries = Object.entries(obj).map(([k, v]) => [normalizeKey(k), v]);
+            const normalizedMap = new Map(normalizedEntries);
+
+            for (const key of candidates) {
+                const value = normalizedMap.get(normalizeKey(key));
+                if (value !== undefined && value !== null && value !== "") return value;
+            }
+
+            return undefined;
+        };
+
+        const normalizeItem = (item) => ({
+            ...item,
+            prioridad: String(item.prioridad).toUpperCase() === "TRUE" || item.prioridad === true || item.prioridad === 1,
+            recurrencia: parseFloat(item.recurrencia) || 0,
+            cuentaViva: parseInt(item.cuentaViva, 10) || 0,
+            definicion: String(getFieldValue(item, DEFINICION_CANDIDATES) ?? "#N/D").trim() || "#N/D"
+        });
+
+        const readJSONStorage = (key) => {
+            try {
+                const raw = localStorage.getItem(key);
+                return raw ? JSON.parse(raw) : null;
+            } catch (e) {
+                console.error(`Error loading ${key}:`, e);
+                return null;
+            }
+        };
+
+        const writeJSONStorage = (key, value) => {
+            try {
+                localStorage.setItem(key, JSON.stringify(value));
+            } catch (e) {
+                console.error(`Error saving ${key}:`, e);
+            }
+        };
+
+        const createInitialFocoItem = () => ({
+            id: "",
+            nombre: "",
+            valorMensual: 0,
+            recurrencia: 0,
+            cuentaViva: 1,
+            definicion: "Flujo Comercial",
+            actividad: "",
+            prioridad: true
+        });
+
+        const getPriorityTextColor = (hex) => {
+            const color = String(hex || "").replace("#", "");
+            if (color.length !== 6) return "#ffffff";
+            const r = parseInt(color.substring(0, 2), 16);
+            const g = parseInt(color.substring(2, 4), 16);
+            const b = parseInt(color.substring(4, 6), 16);
+            const luminance = (0.299 * r + 0.587 * g + 0.114 * b);
+            return luminance > 186 ? "#0f172a" : "#ffffff";
+        };
+
+        const exportPdfReportFile = ({ source, currentUser, priorityLabel, getFocoEtiqueta }) => {
+            try {
+                if (!window.jspdf || !window.jspdf.jsPDF) {
+                    alert("No se pudo cargar la libreria PDF. Recarga la pagina e intenta de nuevo.");
+                    return;
+                }
+
+                const metaTotal = source.reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0);
+                const recurrenciaTotal = source.reduce((a, b) => a + (parseFloat(b.recurrencia) || 0), 0);
+                const recurrenciaCero = source.filter(d => (parseFloat(d.recurrencia) || 0) === 0).length;
+                const avance = metaTotal > 0 ? (recurrenciaTotal / metaTotal) * 100 : 0;
+                const totalClientes = source.length;
+                const divisorClientes = totalClientes || 1;
+                const churnPct = totalClientes > 0 ? (recurrenciaCero / totalClientes) * 100 : 0;
+
+                const estadoRows = [
+                    {
+                        estado: "Vivo",
+                        clientes: source.filter(d => d.cuentaViva === 1).length,
+                        meta: source.filter(d => d.cuentaViva === 1).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
+                    },
+                    {
+                        estado: "Pausado",
+                        clientes: source.filter(d => d.cuentaViva === 2).length,
+                        meta: source.filter(d => d.cuentaViva === 2).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
+                    },
+                    {
+                        estado: "Cerrado",
+                        clientes: source.filter(d => d.cuentaViva === 0).length,
+                        meta: source.filter(d => d.cuentaViva === 0).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
+                    }
+                ];
+
+                const definicionMap = source.reduce((acc, item) => {
+                    const key = (item.definicion || "#N/D").trim() || "#N/D";
+                    acc[key] = (acc[key] || 0) + 1;
+                    return acc;
+                }, {});
+                const prioritySummaryRows = Object.values(
+                    source.reduce((acc, item) => {
+                        if (getFocoEtiqueta(item) !== priorityLabel) return acc;
+                        const def = (item.definicion || "#N/D").trim() || "#N/D";
+                        if (!acc[def]) {
+                            acc[def] = { definicion: def, cantidad: 0, meta: 0, recurrencia: 0 };
+                        }
+                        acc[def].cantidad += 1;
+                        acc[def].meta += parseFloat(item.valorMensual) || 0;
+                        acc[def].recurrencia += parseFloat(item.recurrencia) || 0;
+                        return acc;
+                    }, {})
+                ).sort((a, b) => b.cantidad - a.cantidad);
+                const definicionData = Object.entries(definicionMap)
+                    .map(([label, value]) => ({ label, value }))
+                    .sort((a, b) => b.value - a.value);
+                const pieColors = [
+                    [59, 130, 246],
+                    [16, 185, 129],
+                    [245, 158, 11],
+                    [244, 63, 94],
+                    [100, 116, 139],
+                    [139, 92, 246]
+                ];
+
+                const { jsPDF } = window.jspdf;
+                const doc = new jsPDF("p", "mm", "a4");
+                const pageW = doc.internal.pageSize.getWidth();
+                const margin = 12;
+
+                doc.setFillColor(15, 23, 42);
+                doc.rect(0, 0, pageW, 28, "F");
+                doc.setTextColor(255, 255, 255);
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(16);
+                doc.text("Reporte Ejecutivo CRM", margin, 12);
+                doc.setFontSize(9);
+                doc.text(`Canal: ${currentUser || "Todos"} | Fecha: ${new Date().toLocaleDateString("es-CO")}`, margin, 19);
+
+                const cardW = (pageW - margin * 2 - 8) / 3;
+                const drawMetricCard = (x, y, title, value) => {
+                    doc.setDrawColor(226, 232, 240);
+                    doc.setFillColor(248, 250, 252);
+                    doc.roundedRect(x, y, cardW, 18, 2, 2, "FD");
+                    doc.setTextColor(100, 116, 139);
+                    doc.setFont("helvetica", "bold");
+                    doc.setFontSize(8);
+                    doc.text(title, x + 3, y + 6);
+                    doc.setTextColor(15, 23, 42);
+                    doc.setFontSize(10);
+                    doc.text(value, x + 3, y + 13);
+                };
+                drawMetricCard(margin, 34, "Avance", `${avance.toFixed(1)}%`);
+                drawMetricCard(margin + cardW + 4, 34, "Meta Total", `$${metaTotal.toLocaleString()}`);
+                drawMetricCard(margin + (cardW + 4) * 2, 34, "Recurrencia", `$${recurrenciaTotal.toLocaleString()}`);
+
+                const tableX = margin;
+                const tableY = 58;
+                const tableW = pageW - margin * 2;
+                const rowH = 9;
+                doc.setDrawColor(203, 213, 225);
+                doc.setFillColor(248, 250, 252);
+                doc.roundedRect(tableX, tableY, tableW, 41, 2, 2, "FD");
+                doc.setTextColor(15, 23, 42);
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(10);
+                doc.text("Tabla Estado / Clientes / Meta", tableX + 3, tableY + 6);
+
+                const colEstado = tableX + 3;
+                const colClientes = tableX + 55;
+                const colMeta = tableX + 88;
+                doc.setFillColor(226, 232, 240);
+                doc.rect(tableX + 2, tableY + 9, tableW - 4, rowH - 1, "F");
+                doc.setFontSize(8);
+                doc.text("Estado", colEstado, tableY + 15);
+                doc.text("Clientes", colClientes, tableY + 15);
+                doc.text("Meta Total", colMeta, tableY + 15);
+
+                estadoRows.forEach((row, idx) => {
+                    const y = tableY + 9 + rowH + idx * rowH;
+                    doc.setDrawColor(226, 232, 240);
+                    doc.line(tableX + 2, y + rowH - 1, tableX + tableW - 2, y + rowH - 1);
+                    doc.setTextColor(51, 65, 85);
+                    doc.text(row.estado, colEstado, y + 6);
+                    doc.text(String(row.clientes), colClientes, y + 6);
+                    doc.text(`$${Math.round(row.meta).toLocaleString()}`, colMeta, y + 6);
+                });
+
+                const pieBoxX = margin;
+                const pieBoxY = 104;
+                const pieBoxW = pageW - margin * 2;
+                const pieBoxH = 82;
+                doc.setDrawColor(203, 213, 225);
+                doc.setFillColor(248, 250, 252);
+                doc.roundedRect(pieBoxX, pieBoxY, pieBoxW, pieBoxH, 2, 2, "FD");
+                doc.setTextColor(15, 23, 42);
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(10);
+                doc.text("Distribucion % por Definicion", pieBoxX + 3, pieBoxY + 6);
+
+                const pieCanvas = document.createElement("canvas");
+                pieCanvas.width = 260;
+                pieCanvas.height = 260;
+                const ctx = pieCanvas.getContext("2d");
+                if (ctx && definicionData.length > 0) {
+                    const total = definicionData.reduce((acc, d) => acc + d.value, 0) || 1;
+                    let start = -Math.PI / 2;
+                    definicionData.forEach((item, i) => {
+                        const angle = (item.value / total) * Math.PI * 2;
+                        ctx.beginPath();
+                        ctx.moveTo(130, 130);
+                        ctx.arc(130, 130, 110, start, start + angle);
+                        ctx.closePath();
+                        const c = pieColors[i % pieColors.length];
+                        ctx.fillStyle = `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+                        ctx.fill();
+                        start += angle;
+                    });
+                    doc.addImage(pieCanvas.toDataURL("image/png"), "PNG", pieBoxX + 4, pieBoxY + 10, 56, 56);
+                } else {
+                    doc.setTextColor(100, 116, 139);
+                    doc.setFontSize(8);
+                    doc.text("Sin datos para graficar.", pieBoxX + 6, pieBoxY + 18);
+                }
+
+                doc.setFontSize(8);
+                doc.setTextColor(71, 85, 105);
+                definicionData.slice(0, 6).forEach((item, i) => {
+                    const y = pieBoxY + 16 + i * 10;
+                    const c = pieColors[i % pieColors.length];
+                    const pct = ((item.value / divisorClientes) * 100).toFixed(1);
+                    doc.setFillColor(c[0], c[1], c[2]);
+                    doc.rect(pieBoxX + 66, y - 3, 4, 4, "F");
+                    doc.text(`${item.label}: ${item.value} (${pct}%)`, pieBoxX + 72, y);
+                });
+
+                const churnY = 191;
+                doc.setFillColor(255, 241, 242);
+                doc.setDrawColor(251, 113, 133);
+                doc.roundedRect(margin, churnY, pageW - margin * 2, 22, 2, 2, "FD");
+                doc.setTextColor(190, 24, 93);
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(10);
+                doc.text("Indicador Churn (Recurrencia 0)", margin + 3, churnY + 7);
+                doc.setTextColor(15, 23, 42);
+                doc.setFontSize(11);
+                doc.text(`${recurrenciaCero} de ${totalClientes} clientes (${churnPct.toFixed(1)}%)`, margin + 3, churnY + 15);
+
+                doc.setFontSize(8);
+                doc.setTextColor(148, 163, 184);
+                doc.text("Generado automaticamente por CRM Elite Systems", margin, 288);
+
+                doc.addPage();
+                doc.setFillColor(15, 23, 42);
+                doc.rect(0, 0, pageW, 22, "F");
+                doc.setTextColor(255, 255, 255);
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(13);
+                doc.text("Detalle de Prioridades", margin, 14);
+
+                const pTableX = margin;
+                const pTableY = 30;
+                const pTableW = pageW - margin * 2;
+                const pRowH = 8;
+                const colDef = pTableX + 3;
+                const colCant = pTableX + 70;
+                const colMetaP = pTableX + 95;
+                const colRecP = pTableX + 135;
+
+                doc.setDrawColor(203, 213, 225);
+                doc.setFillColor(248, 250, 252);
+                doc.roundedRect(pTableX, pTableY, pTableW, 10 + Math.max(1, prioritySummaryRows.length) * pRowH, 2, 2, "FD");
+                doc.setFillColor(226, 232, 240);
+                doc.rect(pTableX + 2, pTableY + 3, pTableW - 4, pRowH - 1, "F");
+                doc.setTextColor(15, 23, 42);
+                doc.setFontSize(8);
+                doc.text("Definicion", colDef, pTableY + 8);
+                doc.text("Cantidad", colCant, pTableY + 8);
+                doc.text("Meta", colMetaP, pTableY + 8);
+                doc.text("Recurrencia", colRecP, pTableY + 8);
+
+                if (prioritySummaryRows.length === 0) {
+                    doc.setTextColor(100, 116, 139);
+                    doc.text("No hay prioridades para mostrar.", pTableX + 3, pTableY + 16);
+                } else {
+                    prioritySummaryRows.forEach((row, idx) => {
+                        const y = pTableY + 3 + pRowH + idx * pRowH;
+                        doc.setDrawColor(226, 232, 240);
+                        doc.line(pTableX + 2, y + pRowH - 1, pTableX + pTableW - 2, y + pRowH - 1);
+                        doc.setTextColor(51, 65, 85);
+                        doc.text(String(row.definicion), colDef, y + 6);
+                        doc.text(String(row.cantidad), colCant, y + 6);
+                        doc.text(`$${Math.round(row.meta).toLocaleString()}`, colMetaP, y + 6);
+                        doc.text(`$${Math.round(row.recurrencia).toLocaleString()}`, colRecP, y + 6);
+                    });
+                }
+
+                doc.save(`reporte_crm_${new Date().toISOString().slice(0, 10)}.pdf`);
+            } catch (err) {
+                console.error("Error PDF:", err);
+                alert("Ocurrio un error al generar el PDF.");
+            }
+        };
 
         const App = () => {
             const [data, setData] = useState([]);
@@ -50,78 +386,41 @@
             const [filterDefinicion, setFilterDefinicion] = useState('Todos');
             const [focoDrafts, setFocoDrafts] = useState({});
             const [showNewFocoForm, setShowNewFocoForm] = useState(false);
-            const [newFocoItem, setNewFocoItem] = useState({
-                id: "",
-                nombre: "",
-                valorMensual: 0,
-                recurrencia: 0,
-                cuentaViva: 1,
-                definicion: "Flujo Comercial",
-                actividad: "",
-                prioridad: true
-            });
+            const [showRulesPanel, setShowRulesPanel] = useState(false);
+            const [autoPriorityKeywords, setAutoPriorityKeywords] = useState(DEFAULT_PRIORITY_KEYWORDS);
+            const [autoRulesInput, setAutoRulesInput] = useState(DEFAULT_PRIORITY_KEYWORDS.join(", "));
+            const [priorityLabel, setPriorityLabel] = useState(DEFAULT_PRIORITY_LABEL);
+            const [priorityColor, setPriorityColor] = useState(DEFAULT_PRIORITY_COLOR);
+            const [newFocoItem, setNewFocoItem] = useState(createInitialFocoItem);
             
             // Estado de Autenticación
             const [currentUser, setCurrentUser] = useState(null);
 
             useEffect(() => { fetchData(); }, []);
             useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [data, loading, searchTerm, gestionados, filterEstado, currentUser]);
+            useEffect(() => {
+                const parsed = readJSONStorage(STORAGE_KEYS.autoPriority);
+                if (!Array.isArray(parsed) || parsed.length === 0) return;
+                const normalized = parsed.map(v => String(v).toLowerCase().trim()).filter(Boolean);
+                if (normalized.length > 0) {
+                    setAutoPriorityKeywords(normalized);
+                    setAutoRulesInput(normalized.join(", "));
+                }
+            }, []);
+            useEffect(() => {
+                const cfg = readJSONStorage(STORAGE_KEYS.visualConfig);
+                if (!cfg || typeof cfg !== "object") return;
+                if (cfg.label) setPriorityLabel(String(cfg.label));
+                if (cfg.color) setPriorityColor(String(cfg.color));
+            }, []);
 
             const fetchData = async () => {
                 try {
                     setLoading(true);
                     const response = await fetch(GOOGLE_SCRIPT_URL);
                     const json = await response.json();
-
-                    const normalizeKey = (key) => String(key || "")
-                        .normalize("NFD")
-                        .replace(/[\u0300-\u036f]/g, "")
-                        .replace(/[^a-zA-Z0-9]/g, "")
-                        .toLowerCase();
-
-                    const getFieldValue = (obj, candidates) => {
-                        if (!obj || typeof obj !== "object") return undefined;
-
-                        for (const key of candidates) {
-                            if (Object.prototype.hasOwnProperty.call(obj, key) && obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
-                                return obj[key];
-                            }
-                        }
-
-                        const normalizedEntries = Object.entries(obj).map(([k, v]) => [normalizeKey(k), v]);
-                        const normalizedMap = new Map(normalizedEntries);
-
-                        for (const key of candidates) {
-                            const value = normalizedMap.get(normalizeKey(key));
-                            if (value !== undefined && value !== null && value !== "") return value;
-                        }
-
-                        return undefined;
-                    };
-                    
-                    const normalized = json.map(item => ({
-                        ...item,
-                        prioridad: String(item.prioridad).toUpperCase() === "TRUE" || item.prioridad === true || item.prioridad === 1,
-                        recurrencia: parseFloat(item.recurrencia) || 0,
-                        cuentaViva: parseInt(item.cuentaViva) || 0,
-                        definicion: String(
-    getFieldValue(item, [
-        "definicion",
-        "Definicion",
-        "Definición",
-        "DEFINICION",
-        "DEFINICIÓN",
-        "columnaV",
-        "Columna V",
-        "V",
-        "v",
-        "actividad",
-        "Actividad",
-        "ACTIVIDAD"
-    ]) ?? "#N/D"
-).trim() || "#N/D"
-                    }));
-                    setData(normalized);
+                    const rows = Array.isArray(json) ? json : [];
+                    setData(rows.map(normalizeItem));
                 } catch (e) { console.error("Error fetching:", e); } finally { setLoading(false); }
             };
 
@@ -175,25 +474,26 @@
 
                 await updateItem(newItem, false);
                 setShowNewFocoForm(false);
-                setNewFocoItem({
-                    id: "",
-                    nombre: "",
-                    valorMensual: 0,
-                    recurrencia: 0,
-                    cuentaViva: 1,
-                    definicion: "Flujo Comercial",
-                    actividad: "",
-                    prioridad: true
-                });
+                setNewFocoItem(createInitialFocoItem());
             };
 
             const isPriority = (item) => {
                 if (item.prioridad) return "manual";
-                const def = item.definicion.toLowerCase();
-                if (def.includes("flujo comercial") || def.includes("stock")) return "auto";
+                if (matchesAutoPriorityRule(item)) return "auto";
                 if (item.cuentaViva === 1 && (item.recurrencia === 0 || item.recurrencia === 2)) return "auto";
                 if (item.cuentaViva === 1 && item.recurrencia < (item.valorMensual * 0.5)) return "auto";
                 return null;
+            };
+
+            const matchesAutoPriorityRule = (item) => {
+                const def = String(item.definicion || "").toLowerCase();
+                return autoPriorityKeywords.some(k => k && def.includes(k));
+            };
+
+            const getFocoEtiqueta = (item) => {
+                if (item.prioridad || matchesAutoPriorityRule(item)) return priorityLabel;
+                if ((parseFloat(item.recurrencia) || 0) === 0) return "Critico";
+                return "Normal";
             };
 
             const getNivel = (item) => {
@@ -250,191 +550,86 @@
             }, [userFilteredData, searchTerm, filterEstado, filterDefinicion]);
 
             const focoEstrategico = useMemo(() => {
-                return finalData.filter(d => (isPriority(d) !== null || getNivel(d) !== "Normal") && !gestionados.includes(d.id));
-            }, [finalData, gestionados]);
+                const getFocoRank = (item) => {
+                    const etiqueta = getFocoEtiqueta(item);
+                    if (etiqueta === priorityLabel) return 1;
+                    if (etiqueta === "Critico") return 2;
+                    return 3;
+                };
+
+                return finalData
+                    .filter(d => getFocoEtiqueta(d) !== "Normal" && !gestionados.includes(d.id))
+                    .slice()
+                    .sort((a, b) => {
+                        const rankDiff = getFocoRank(a) - getFocoRank(b);
+                        if (rankDiff !== 0) return rankDiff;
+                        return String(a.nombre || "").localeCompare(String(b.nombre || ""));
+                    });
+            }, [finalData, gestionados, autoPriorityKeywords, priorityLabel]);
+
+            const saveAutoPriorityRules = () => {
+                const parsed = autoRulesInput
+                    .split(",")
+                    .map(v => v.toLowerCase().trim())
+                    .filter(Boolean);
+                if (parsed.length === 0) {
+                    alert("Debes ingresar al menos una regla.");
+                    return;
+                }
+                setAutoPriorityKeywords(parsed);
+                writeJSONStorage(STORAGE_KEYS.autoPriority, parsed);
+                writeJSONStorage(STORAGE_KEYS.visualConfig, {
+                    label: priorityLabel || DEFAULT_PRIORITY_LABEL,
+                    color: priorityColor || DEFAULT_PRIORITY_COLOR
+                });
+                alert("Reglas actualizadas.");
+            };
+
+            const clearAutoPriorityRules = () => {
+                setAutoPriorityKeywords([]);
+                setAutoRulesInput("");
+                setPriorityLabel(DEFAULT_PRIORITY_LABEL);
+                setPriorityColor(DEFAULT_PRIORITY_COLOR);
+                localStorage.removeItem(STORAGE_KEYS.autoPriority);
+                localStorage.removeItem(STORAGE_KEYS.visualConfig);
+                alert("Reglas eliminadas.");
+            };
+
+            const applyAutomaticPriorities = async () => {
+                const targets = userFilteredData.filter(item => matchesAutoPriorityRule(item) && !item.prioridad);
+                if (targets.length === 0) {
+                    alert("No hay registros para aplicar prioridad automática.");
+                    return;
+                }
+
+                setSaving(true);
+                const targetIds = new Set(targets.map(t => String(t.id)));
+                setData(prev => prev.map(item => targetIds.has(String(item.id)) ? { ...item, prioridad: true } : item));
+
+                try {
+                    await Promise.all(
+                        targets.map(item => fetch(GOOGLE_SCRIPT_URL, {
+                            method: "POST",
+                            mode: "no-cors",
+                            body: JSON.stringify({ ...item, prioridad: true })
+                        }))
+                    );
+                    alert(`Prioridades automáticas aplicadas: ${targets.length}`);
+                } catch (e) {
+                    console.error("Error applying automatic priorities:", e);
+                    alert("Ocurrió un error aplicando prioridades automáticas.");
+                } finally {
+                    setTimeout(() => setSaving(false), 300);
+                }
+            };
 
             const exportPdfReport = () => {
-                try {
-                    if (!window.jspdf || !window.jspdf.jsPDF) {
-                        alert("No se pudo cargar la libreria PDF. Recarga la pagina e intenta de nuevo.");
-                        return;
-                    }
-
-                    const source = userFilteredData;
-                    const metaTotal = source.reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0);
-                    const recurrenciaTotal = source.reduce((a, b) => a + (parseFloat(b.recurrencia) || 0), 0);
-                    const recurrenciaCero = source.filter(d => (parseFloat(d.recurrencia) || 0) === 0).length;
-                    const avance = metaTotal > 0 ? (recurrenciaTotal / metaTotal) * 100 : 0;
-                    const totalClientes = source.length;
-                    const divisorClientes = totalClientes || 1;
-                    const churnPct = totalClientes > 0 ? (recurrenciaCero / totalClientes) * 100 : 0;
-
-                    const estadoRows = [
-                        {
-                            estado: "Vivo",
-                            clientes: source.filter(d => d.cuentaViva === 1).length,
-                            meta: source.filter(d => d.cuentaViva === 1).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
-                        },
-                        {
-                            estado: "Pausado",
-                            clientes: source.filter(d => d.cuentaViva === 2).length,
-                            meta: source.filter(d => d.cuentaViva === 2).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
-                        },
-                        {
-                            estado: "Cerrado",
-                            clientes: source.filter(d => d.cuentaViva === 0).length,
-                            meta: source.filter(d => d.cuentaViva === 0).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
-                        }
-                    ];
-
-                    const definicionMap = source.reduce((acc, item) => {
-                        const key = (item.definicion || "#N/D").trim() || "#N/D";
-                        acc[key] = (acc[key] || 0) + 1;
-                        return acc;
-                    }, {});
-                    const definicionData = Object.entries(definicionMap)
-                        .map(([label, value]) => ({ label, value }))
-                        .sort((a, b) => b.value - a.value);
-                    const pieColors = [
-                        [59, 130, 246],
-                        [16, 185, 129],
-                        [245, 158, 11],
-                        [244, 63, 94],
-                        [100, 116, 139],
-                        [139, 92, 246]
-                    ];
-
-                    const { jsPDF } = window.jspdf;
-                    const doc = new jsPDF("p", "mm", "a4");
-                    const pageW = doc.internal.pageSize.getWidth();
-                    const margin = 12;
-
-                    doc.setFillColor(15, 23, 42);
-                    doc.rect(0, 0, pageW, 28, "F");
-                    doc.setTextColor(255, 255, 255);
-                    doc.setFont("helvetica", "bold");
-                    doc.setFontSize(16);
-                    doc.text("Reporte Ejecutivo CRM", margin, 12);
-                    doc.setFontSize(9);
-                    doc.text(`Canal: ${currentUser || "Todos"} | Fecha: ${new Date().toLocaleDateString("es-CO")}`, margin, 19);
-
-                    const cardW = (pageW - margin * 2 - 8) / 3;
-                    const drawMetricCard = (x, y, title, value) => {
-                        doc.setDrawColor(226, 232, 240);
-                        doc.setFillColor(248, 250, 252);
-                        doc.roundedRect(x, y, cardW, 18, 2, 2, "FD");
-                        doc.setTextColor(100, 116, 139);
-                        doc.setFont("helvetica", "bold");
-                        doc.setFontSize(8);
-                        doc.text(title, x + 3, y + 6);
-                        doc.setTextColor(15, 23, 42);
-                        doc.setFontSize(10);
-                        doc.text(value, x + 3, y + 13);
-                    };
-                    drawMetricCard(margin, 34, "Avance", `${avance.toFixed(1)}%`);
-                    drawMetricCard(margin + cardW + 4, 34, "Meta Total", `$${metaTotal.toLocaleString()}`);
-                    drawMetricCard(margin + (cardW + 4) * 2, 34, "Recurrencia", `$${recurrenciaTotal.toLocaleString()}`);
-
-                    const tableX = margin;
-                    const tableY = 58;
-                    const tableW = pageW - margin * 2;
-                    const rowH = 9;
-                    doc.setDrawColor(203, 213, 225);
-                    doc.setFillColor(248, 250, 252);
-                    doc.roundedRect(tableX, tableY, tableW, 41, 2, 2, "FD");
-                    doc.setTextColor(15, 23, 42);
-                    doc.setFont("helvetica", "bold");
-                    doc.setFontSize(10);
-                    doc.text("Tabla Estado / Clientes / Meta", tableX + 3, tableY + 6);
-
-                    const colEstado = tableX + 3;
-                    const colClientes = tableX + 55;
-                    const colMeta = tableX + 88;
-                    doc.setFillColor(226, 232, 240);
-                    doc.rect(tableX + 2, tableY + 9, tableW - 4, rowH - 1, "F");
-                    doc.setFontSize(8);
-                    doc.text("Estado", colEstado, tableY + 15);
-                    doc.text("Clientes", colClientes, tableY + 15);
-                    doc.text("Meta Total", colMeta, tableY + 15);
-
-                    estadoRows.forEach((row, idx) => {
-                        const y = tableY + 9 + rowH + idx * rowH;
-                        doc.setDrawColor(226, 232, 240);
-                        doc.line(tableX + 2, y + rowH - 1, tableX + tableW - 2, y + rowH - 1);
-                        doc.setTextColor(51, 65, 85);
-                        doc.text(row.estado, colEstado, y + 6);
-                        doc.text(String(row.clientes), colClientes, y + 6);
-                        doc.text(`$${Math.round(row.meta).toLocaleString()}`, colMeta, y + 6);
-                    });
-
-                    const pieBoxX = margin;
-                    const pieBoxY = 104;
-                    const pieBoxW = pageW - margin * 2;
-                    const pieBoxH = 82;
-                    doc.setDrawColor(203, 213, 225);
-                    doc.setFillColor(248, 250, 252);
-                    doc.roundedRect(pieBoxX, pieBoxY, pieBoxW, pieBoxH, 2, 2, "FD");
-                    doc.setTextColor(15, 23, 42);
-                    doc.setFont("helvetica", "bold");
-                    doc.setFontSize(10);
-                    doc.text("Distribucion % por Definicion", pieBoxX + 3, pieBoxY + 6);
-
-                    const pieCanvas = document.createElement("canvas");
-                    pieCanvas.width = 260;
-                    pieCanvas.height = 260;
-                    const ctx = pieCanvas.getContext("2d");
-                    if (ctx && definicionData.length > 0) {
-                        const total = definicionData.reduce((acc, d) => acc + d.value, 0) || 1;
-                        let start = -Math.PI / 2;
-                        definicionData.forEach((item, i) => {
-                            const angle = (item.value / total) * Math.PI * 2;
-                            ctx.beginPath();
-                            ctx.moveTo(130, 130);
-                            ctx.arc(130, 130, 110, start, start + angle);
-                            ctx.closePath();
-                            const c = pieColors[i % pieColors.length];
-                            ctx.fillStyle = `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
-                            ctx.fill();
-                            start += angle;
-                        });
-                        doc.addImage(pieCanvas.toDataURL("image/png"), "PNG", pieBoxX + 4, pieBoxY + 10, 56, 56);
-                    } else {
-                        doc.setTextColor(100, 116, 139);
-                        doc.setFontSize(8);
-                        doc.text("Sin datos para graficar.", pieBoxX + 6, pieBoxY + 18);
-                    }
-
-                    doc.setFontSize(8);
-                    doc.setTextColor(71, 85, 105);
-                    definicionData.slice(0, 6).forEach((item, i) => {
-                        const y = pieBoxY + 16 + i * 10;
-                        const c = pieColors[i % pieColors.length];
-                        const pct = ((item.value / divisorClientes) * 100).toFixed(1);
-                        doc.setFillColor(c[0], c[1], c[2]);
-                        doc.rect(pieBoxX + 66, y - 3, 4, 4, "F");
-                        doc.text(`${item.label}: ${item.value} (${pct}%)`, pieBoxX + 72, y);
-                    });
-
-                    const churnY = 191;
-                    doc.setFillColor(255, 241, 242);
-                    doc.setDrawColor(251, 113, 133);
-                    doc.roundedRect(margin, churnY, pageW - margin * 2, 22, 2, 2, "FD");
-                    doc.setTextColor(190, 24, 93);
-                    doc.setFont("helvetica", "bold");
-                    doc.setFontSize(10);
-                    doc.text("Indicador Churn (Recurrencia 0)", margin + 3, churnY + 7);
-                    doc.setTextColor(15, 23, 42);
-                    doc.setFontSize(11);
-                    doc.text(`${recurrenciaCero} de ${totalClientes} clientes (${churnPct.toFixed(1)}%)`, margin + 3, churnY + 15);
-
-                    doc.setFontSize(8);
-                    doc.setTextColor(148, 163, 184);
-                    doc.text("Generado automaticamente por CRM Elite Systems", margin, 288);
-                    doc.save(`reporte_crm_${new Date().toISOString().slice(0, 10)}.pdf`);
-                } catch (err) {
-                    console.error("Error PDF:", err);
-                    alert("Ocurrio un error al generar el PDF.");
-                }
+                exportPdfReportFile({
+                    source: userFilteredData,
+                    currentUser,
+                    priorityLabel,
+                    getFocoEtiqueta
+                });
             };
 
             // Pantalla de Selección de Usuario
@@ -485,6 +680,11 @@
                                     <div className="flex items-center gap-2">
                                         <span className="text-[9px] font-black text-blue-600 uppercase tracking-widest">Canal: {currentUser}</span>
                                         <button onClick={() => setCurrentUser(null)} className="text-[8px] font-bold text-slate-400 underline uppercase hover:text-rose-500">Cambiar</button>
+                                        {currentUser === MASTER_USER && (
+                                            <button onClick={() => setShowRulesPanel(prev => !prev)} className="text-[8px] font-bold text-slate-500 underline uppercase hover:text-blue-600">
+                                                Reglas
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -506,6 +706,53 @@
                             </button>
                         </div>
                     </header>
+
+                    {currentUser === MASTER_USER && showRulesPanel && (
+                        <div className="mb-6 bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
+                            <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2">Regla automática de Prioridad</p>
+                            <div className="flex flex-col sm:flex-row gap-2">
+                                <input
+                                    className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-slate-400"
+                                    placeholder="Ej: flujo comercial, stock"
+                                    value={autoRulesInput}
+                                    onChange={e => setAutoRulesInput(e.target.value)}
+                                />
+                                <input
+                                    className="sm:w-40 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-slate-400"
+                                    placeholder="Etiqueta"
+                                    value={priorityLabel}
+                                    onChange={e => setPriorityLabel(e.target.value || "Prioridad")}
+                                />
+                                <input
+                                    type="color"
+                                    className="sm:w-14 h-10 bg-slate-50 border border-slate-200 rounded-xl p-1 cursor-pointer"
+                                    value={priorityColor}
+                                    onChange={e => setPriorityColor(e.target.value)}
+                                    title="Color etiqueta prioridad"
+                                />
+                                <button
+                                    onClick={saveAutoPriorityRules}
+                                    className="px-4 py-2 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
+                                >
+                                    Guardar Reglas
+                                </button>
+                            </div>
+                            <div className="flex flex-col sm:flex-row gap-2 mt-2">
+                                <button
+                                    onClick={applyAutomaticPriorities}
+                                    className="px-4 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
+                                >
+                                    Prioridades Automáticas
+                                </button>
+                                <button
+                                    onClick={clearAutoPriorityRules}
+                                    className="px-4 py-2 bg-rose-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
+                                >
+                                    Borrar Reglas
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 md:gap-6 mb-8">
                         <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
@@ -630,8 +877,20 @@
                                                             <span className="text-[7px] font-black px-1.5 py-0.5 rounded uppercase bg-blue-600/20 text-blue-300 border border-blue-500/30">
                                                                 ID: {p.id}
                                                             </span>
-                                                            <span className={`text-[7px] font-black uppercase px-1.5 py-0.5 rounded ${getNivel(p) === 'Critico' ? 'bg-rose-600 text-white' : 'text-amber-400 border border-amber-400/30'}`}>
-                                                                {getNivel(p)}
+                                                            <span className={`text-[7px] font-black uppercase px-1.5 py-0.5 rounded ${
+                                                                getFocoEtiqueta(p) === priorityLabel
+                                                                    ? ''
+                                                                    : getFocoEtiqueta(p) === 'Critico'
+                                                                        ? 'bg-rose-600 text-white'
+                                                                        : 'text-amber-400 border border-amber-400/30'
+                                                            }`}
+                                                            style={getFocoEtiqueta(p) === priorityLabel ? {
+                                                                backgroundColor: priorityColor,
+                                                                color: getPriorityTextColor(priorityColor),
+                                                                border: "1px solid rgba(255,255,255,0.25)"
+                                                            } : {}}
+                                                            >
+                                                                {getFocoEtiqueta(p)}
                                                             </span>
                                                         </div>
                                                     </div>
