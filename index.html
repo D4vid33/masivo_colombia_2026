@@ -49,7 +49,7 @@
         // ============= core-utils.jsx =============
         const { useState, useEffect, useMemo } = React;
 
-        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzFLrUjq7YbvcY8PlKO2z7vSL-FmKZP6iPgvO59EV5LEAqM17s4BhMGKsLtikHeoVAfJg/exec";
+        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw0iLkG8SXImxW0wPGgQLUjoyd6s7W9LoQZPIrsG6VBSNdZzcxI5s4kYUjB-5wba8B8mA/exec";
         const MASTER_USER = "Master";
         const DEFAULT_PRIORITY_LABEL = "Prioridad";
         const DEFAULT_PRIORITY_COLOR = "#3b82f6";
@@ -1137,6 +1137,7 @@
             const updateItem = async (updatedItem, isClosing = false) => {
                 setSaving(true);
                 const finalItem = isClosing ? { ...updatedItem, prioridad: false } : updatedItem;
+                let reingresoPayload = null;
                 if (isClosing) {
                     setGestionados(prev => [...prev, finalItem.id]);
                     setLastManagedAt(prev => {
@@ -1152,22 +1153,43 @@
                     const wasVivo = existing && existing.cuentaViva === 1;
                     const nowInactivo = finalItem.cuentaViva === 0 || finalItem.cuentaViva === 2;
                     if (wasVivo && nowInactivo) {
+                        const nowTs = Date.now();
+                        const reingresoItem = {
+                            id: finalItem.id,
+                            nombre: finalItem.nombre,
+                            propietarioOriginal: finalItem.propietario || "",
+                            valorOriginal: parseFloat(finalItem.valorMensual) || 0,
+                            valorRecuperado: 0,
+                            estadoChurn: finalItem.cuentaViva === 2 ? "Pausado" : "Cerrado",
+                            asesorRecupero: "",
+                            notaRecupero: "",
+                            etapaGestion: "",
+                            fechaAcuerdo: "",
+                            fechaIngreso: nowTs,
+                            fechaRecupero: 0,
+                            recuperada: false,
+                            definicion: finalItem.definicion || "#N/D"
+                        };
+
+                        reingresoPayload = {
+                            _reingresoRecupero: true,
+                            _estadoChurn: reingresoItem.estadoChurn,
+                            _fechaIngresoRecupero: new Date(nowTs).toISOString(),
+                            _valorOriginalRecupero: reingresoItem.valorOriginal,
+                            _definicionRecupero: reingresoItem.definicion,
+                            _propietarioOriginalRecupero: reingresoItem.propietarioOriginal
+                        };
+
+                        setRecuperoDrafts(prev => {
+                            if (!prev[String(finalItem.id)]) return prev;
+                            const next = { ...prev };
+                            delete next[String(finalItem.id)];
+                            return next;
+                        });
+                        setRecuperoClosedList(prev => prev.filter(r => String(r.id) !== String(finalItem.id)));
                         setRecuperoList(prev => {
-                            const alreadyIn = prev.some(r => String(r.id) === String(finalItem.id));
-                            if (alreadyIn) return prev;
-                            return [{
-                                id: finalItem.id,
-                                nombre: finalItem.nombre,
-                                propietarioOriginal: finalItem.propietario || "",
-                                valorOriginal: parseFloat(finalItem.valorMensual) || 0,
-                                valorRecuperado: parseFloat(finalItem.valorMensual) || 0,
-                                estadoChurn: finalItem.cuentaViva === 2 ? "Pausado" : "Cerrado",
-                                asesorRecupero: "",
-                                notaRecupero: "",
-                                fechaIngreso: Date.now(),
-                                recuperada: false,
-                                definicion: finalItem.definicion || "#N/D"
-                            }, ...prev];
+                            const next = prev.filter(r => String(r.id) !== String(finalItem.id));
+                            return [reingresoItem, ...next];
                         });
                     }
                     const exists = prevData.some(d => String(d.id) === String(finalItem.id));
@@ -1180,7 +1202,10 @@
                     await fetch(GOOGLE_SCRIPT_URL, {
                         method: 'POST',
                         mode: 'no-cors',
-                        body: JSON.stringify(finalItem)
+                        body: JSON.stringify({
+                            ...finalItem,
+                            ...reingresoPayload
+                        })
                     });
                 } catch (e) {
                     console.error("Error updating:", e);
