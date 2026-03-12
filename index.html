@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CRM Strategy Hub - David</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // El warning de Tailwind CDN es solo informativo â€” no afecta funcionalidad
+        // Se suprime para mantener la consola limpia en producciÃ³n
+        (function() {
+            const _warn = console.warn;
+            console.warn = function(...args) {
+                if (typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return;
+                _warn.apply(console, args);
+            };
+        })();
+    </script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -35,23 +46,174 @@
     <div id="root"></div>
 
     <script type="text/babel">
+        // ============= core-utils.jsx =============
         const { useState, useEffect, useMemo } = React;
 
-        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxzGg24cBKOP4AZtQvewr79VWnZRTe0SHqS789QOW9wFMJtFA0pHPHC69MRXAigFot_/exec";
+        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzFLrUjq7YbvcY8PlKO2z7vSL-FmKZP6iPgvO59EV5LEAqM17s4BhMGKsLtikHeoVAfJg/exec";
         const MASTER_USER = "Master";
-        const DEFAULT_PRIORITY_KEYWORDS = ["flujo comercial", "stock"];
         const DEFAULT_PRIORITY_LABEL = "Prioridad";
         const DEFAULT_PRIORITY_COLOR = "#3b82f6";
+        const MIN_KEYWORD_RULES = 3;
+        const DEFAULT_SCORING_CONFIG = {
+            keywordRules: [
+                { id: "rule-flujo-comercial", keyword: "flujo comercial", points: 45 },
+                { id: "rule-stock", keyword: "stock", points: 35 },
+                { id: "rule-flujo-cobranzas", keyword: "flujo cobranzas", points: 30 }
+            ],
+            points: {
+                manual: 100,
+                recurrenciaCero: 60,
+                recurrenciaBaja: 35,
+                pausaSinRecurrencia: 40
+            },
+            thresholds: {
+                prioridad: 70,
+                critico: 40
+            }
+        };
         const STORAGE_KEYS = {
-            autoPriority: "crm_auto_priority_keywords",
-            visualConfig: "crm_priority_visual_config"
+            scoringConfig: "crm_priority_scoring_config",
+            visualConfig: "crm_priority_visual_config",
+            auditManagedAt: "crm_audit_managed_at",
+            recuperoScoring: "crm_recupero_scoring"
+        };
+
+        const ETAPAS_RECUPERO = [
+            { id: 'acuerdo_pago',      label: 'Acuerdo de Pago',    color: 'bg-emerald-100 text-emerald-700 border-emerald-200',  dot: 'bg-emerald-500',  pideFecha: true  },
+            { id: 'acuerdo_vencido',   label: 'Acuerdo Vencido',    color: 'bg-orange-100 text-orange-700 border-orange-200',     dot: 'bg-orange-500',   pideFecha: false },
+            { id: 'en_negociacion',    label: 'En Negociacion',     color: 'bg-blue-100 text-blue-700 border-blue-200',           dot: 'bg-blue-500',     pideFecha: false },
+            { id: 'volver_llamar',     label: 'Volver a Llamar',    color: 'bg-amber-100 text-amber-700 border-amber-200',        dot: 'bg-amber-500',    pideFecha: false },
+            { id: 'sin_contacto',      label: 'Sin Contacto',       color: 'bg-slate-100 text-slate-500 border-slate-200',        dot: 'bg-slate-400',    pideFecha: false },
+            { id: 'recuperado',        label: 'Recuperado',         color: 'bg-teal-100 text-teal-700 border-teal-200',           dot: 'bg-teal-500',     pideFecha: false },
+            { id: 'perdido_definitivo',label: 'Perdido Definitivo', color: 'bg-rose-100 text-rose-700 border-rose-200',           dot: 'bg-rose-500',     pideFecha: false },
+        ];
+
+        const DEFAULT_RECUPERO_SCORING = {
+            acuerdo_pago:       80,
+            acuerdo_vencido:    20,
+            en_negociacion:     50,
+            volver_llamar:      30,
+            sin_contacto:       10,
+            recuperado:         100,
+            perdido_definitivo: 0
+        };
+        const ETAPAS_RECUPERO_MAP = new Map(ETAPAS_RECUPERO.map(et => [et.id, et]));
+        const ETAPAS_RECUPERO_EDITABLES = ETAPAS_RECUPERO.filter(et => et.id !== 'acuerdo_vencido');
+
+        const getEffectiveRecuperoStage = (item) => {
+            if (item?._acuerdoVencido) return 'acuerdo_vencido';
+            return item?.etapaGestion || '';
+        };
+
+        const isRecuperoRecoveredStage = (stage) => {
+            const normalized = String(stage || "").trim().toLowerCase();
+            return normalized === "recuperado" || normalized === "recuperada";
+        };
+
+        const isRecuperoLostStage = (stage) => {
+            const normalized = String(stage || "").trim().toLowerCase();
+            return normalized === "perdido definitivo" || normalized === "perdida";
+        };
+
+        const compareRecuperoAsesorItems = (a, b, scoringMap) => {
+            const aVencido = a._acuerdoVencido ? 1 : 0;
+            const bVencido = b._acuerdoVencido ? 1 : 0;
+            if (aVencido !== bVencido) return bVencido - aVencido;
+
+            const etapaA = getEffectiveRecuperoStage(a);
+            const etapaB = getEffectiveRecuperoStage(b);
+            const aSin = !etapaA ? 1 : 0;
+            const bSin = !etapaB ? 1 : 0;
+            if (aSin !== bSin) return bSin - aSin;
+
+            const scoreDiff = (scoringMap[etapaB] ?? 0) - (scoringMap[etapaA] ?? 0);
+            if (scoreDiff !== 0) return scoreDiff;
+
+            return String(a.nombre || "").localeCompare(String(b.nombre || ""));
+        };
+
+        const compareRecuperoPanelItems = (a, b, scoringMap) => {
+            const aFinal = a.recuperada;
+            const bFinal = b.recuperada;
+            if (aFinal && !bFinal) return 1;
+            if (!aFinal && bFinal) return -1;
+            if (aFinal && bFinal) return 0;
+
+            const aVencido = a._acuerdoVencido ? 1 : 0;
+            const bVencido = b._acuerdoVencido ? 1 : 0;
+            if (aVencido !== bVencido) return bVencido - aVencido;
+
+            const etapaA = getEffectiveRecuperoStage(a);
+            const etapaB = getEffectiveRecuperoStage(b);
+            const aSinGestion = !etapaA ? 1 : 0;
+            const bSinGestion = !etapaB ? 1 : 0;
+            if (aSinGestion !== bSinGestion) return bSinGestion - aSinGestion;
+
+            const fechaGestionA = parseInt(a.fechaRecupero, 10) || 0;
+            const fechaGestionB = parseInt(b.fechaRecupero, 10) || 0;
+            if (fechaGestionA !== fechaGestionB) return fechaGestionA - fechaGestionB;
+
+            const scoreA = scoringMap[etapaA] ?? 0;
+            const scoreB = scoringMap[etapaB] ?? 0;
+            if (scoreA !== scoreB) return scoreB - scoreA;
+
+            return String(a.nombre || "").localeCompare(String(b.nombre || ""));
+        };
+
+        // Verifica si un acuerdo de pago esta vencido
+        const parseSheetDate = (value) => {
+            if (!value) return null;
+            if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+
+            const raw = String(value).trim();
+            if (!raw) return null;
+
+            if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+                const parsed = new Date(`${raw}T00:00:00`);
+                return Number.isNaN(parsed.getTime()) ? null : parsed;
+            }
+
+            if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+                const parsed = new Date(raw);
+                return Number.isNaN(parsed.getTime()) ? null : parsed;
+            }
+
+            const slashMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (slashMatch) {
+                const [, day, month, year] = slashMatch;
+                const parsed = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00`);
+                return Number.isNaN(parsed.getTime()) ? null : parsed;
+            }
+
+            const parsed = new Date(raw);
+            return Number.isNaN(parsed.getTime()) ? null : parsed;
+        };
+
+        const normalizeSheetDate = (value) => {
+            const parsed = parseSheetDate(value);
+            if (!parsed) return '';
+            const year = parsed.getFullYear();
+            const month = String(parsed.getMonth() + 1).padStart(2, '0');
+            const day = String(parsed.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        };
+
+        const isAcuerdoVencido = (rec) => {
+            if (rec.etapaGestion !== 'acuerdo_pago') return false;
+            if (!rec.fechaAcuerdo) return false;
+            const hoy = new Date();
+            hoy.setHours(0,0,0,0);
+            const fecha = parseSheetDate(rec.fechaAcuerdo);
+            if (!fecha) return false;
+            fecha.setHours(0,0,0,0);
+            return fecha < hoy;
         };
         const DEFINICION_CANDIDATES = [
             "definicion",
             "Definicion",
-            "Definición",
+            "DefiniciÃ³n",
             "DEFINICION",
-            "DEFINICIÓN",
+            "DEFINICIÃ“N",
             "columnaV",
             "Columna V",
             "V",
@@ -95,6 +257,23 @@
             definicion: String(getFieldValue(item, DEFINICION_CANDIDATES) ?? "#N/D").trim() || "#N/D"
         });
 
+        const normalizeRecuperoItem = (item) => ({
+            id:                  item.id,
+            nombre:              item.nombre,
+            propietarioOriginal: item.propietarioOriginal || '',
+            definicion:          item.definicion || '#N/D',
+            valorOriginal:       parseFloat(item.valorOriginal) || 0,
+            valorRecuperado:     parseFloat(item.valorRecuperado) || 0,
+            estadoChurn:         item.estadoChurn || '',
+            asesorRecupero:      item.ejecutivoRecupero || item.asesorRecupero || '',
+            notaRecupero:        item.gestionRecupero || item.notaRecupero || '',
+            etapaGestion:        item.etapaGestion || '',
+            fechaAcuerdo:        normalizeSheetDate(item.fechaAcuerdo),
+            fechaIngreso:        item.fechaIngreso ? new Date(item.fechaIngreso).getTime() : Date.now(),
+            fechaRecupero:       item.fechaRecupero ? new Date(item.fechaRecupero).getTime() : 0,
+            recuperada:          item.recuperada === true
+        });
+
         const readJSONStorage = (key) => {
             try {
                 const raw = localStorage.getItem(key);
@@ -117,7 +296,7 @@
             id: "",
             nombre: "",
             valorMensual: 0,
-            recurrencia: 0,
+            recurrencia: "",
             cuentaViva: 1,
             definicion: "Flujo Comercial",
             actividad: "",
@@ -134,57 +313,103 @@
             return luminance > 186 ? "#0f172a" : "#ffffff";
         };
 
-        const exportPdfReportFile = ({ source, currentUser, priorityLabel, getFocoEtiqueta }) => {
+        const createScoreRule = (keyword = "", points = 20) => ({
+            id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            keyword,
+            points
+        });
+
+        const getOrigenSegment = (priorityType) => {
+            if (priorityType === "manual") return "Manual";
+            return "Sin Prioridad";
+        };
+
+        const ensureMinKeywordRules = (rules) => {
+            const baseRules = Array.isArray(rules) ? rules.slice() : [];
+            while (baseRules.length < MIN_KEYWORD_RULES) {
+                baseRules.push(createScoreRule("", 20));
+            }
+            return baseRules;
+        };
+
+        const sanitizeScoringConfig = (cfg) => {
+            const source = cfg && typeof cfg === "object" ? cfg : {};
+            const rawKeywordRules = Array.isArray(source.keywordRules) ? source.keywordRules : [];
+            const keywordRules = rawKeywordRules
+                .map(rule => ({
+                    id: String(rule.id || createScoreRule().id),
+                    keyword: String(rule.keyword || "").toLowerCase().trim(),
+                    points: parseInt(rule.points, 10) || 0
+                }))
+                .filter(rule => rule.keyword.length > 0);
+
+            const points = {
+                manual: parseInt(source?.points?.manual, 10),
+                recurrenciaCero: parseInt(source?.points?.recurrenciaCero, 10),
+                recurrenciaBaja: parseInt(source?.points?.recurrenciaBaja, 10),
+                pausaSinRecurrencia: parseInt(source?.points?.pausaSinRecurrencia, 10)
+            };
+
+            const thresholds = {
+                prioridad: parseInt(source?.thresholds?.prioridad, 10),
+                critico: parseInt(source?.thresholds?.critico, 10)
+            };
+
+            return {
+                keywordRules: ensureMinKeywordRules(keywordRules.length > 0 ? keywordRules : DEFAULT_SCORING_CONFIG.keywordRules),
+                points: {
+                    manual: Number.isFinite(points.manual) ? points.manual : DEFAULT_SCORING_CONFIG.points.manual,
+                    recurrenciaCero: Number.isFinite(points.recurrenciaCero) ? points.recurrenciaCero : DEFAULT_SCORING_CONFIG.points.recurrenciaCero,
+                    recurrenciaBaja: Number.isFinite(points.recurrenciaBaja) ? points.recurrenciaBaja : DEFAULT_SCORING_CONFIG.points.recurrenciaBaja,
+                    pausaSinRecurrencia: Number.isFinite(points.pausaSinRecurrencia) ? points.pausaSinRecurrencia : DEFAULT_SCORING_CONFIG.points.pausaSinRecurrencia
+                },
+                thresholds: {
+                    prioridad: Number.isFinite(thresholds.prioridad) ? thresholds.prioridad : DEFAULT_SCORING_CONFIG.thresholds.prioridad,
+                    critico: Number.isFinite(thresholds.critico) ? thresholds.critico : DEFAULT_SCORING_CONFIG.thresholds.critico
+                }
+            };
+        };
+
+        // ============= FUNCIÃ“N PDF MODIFICADA (usa source = focoEstrategico) =============
+        const exportPdfReportFile = ({ source, fullData, recoveredData, recuperoSummary, currentUser, priorityLabel, getFocoEtiqueta }) => {
             try {
                 if (!window.jspdf || !window.jspdf.jsPDF) {
                     alert("No se pudo cargar la libreria PDF. Recarga la pagina e intenta de nuevo.");
                     return;
                 }
 
-                const metaTotal = source.reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0);
-                const recurrenciaTotal = source.reduce((a, b) => a + (parseFloat(b.recurrencia) || 0), 0);
-                const recurrenciaCero = source.filter(d => (parseFloat(d.recurrencia) || 0) === 0).length;
+                // source ahora es el foco estratÃ©gico (manuales + automÃ¡ticos con puntaje alto)
+                const metaTotal = fullData.reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0);
+                const recurrenciaTotal = fullData.reduce((a, b) => a + (parseFloat(b.recurrencia) || 0), 0);
+                const recurrenciaCero = fullData.filter(d => (parseFloat(d.recurrencia) || 0) === 0).length;
                 const avance = metaTotal > 0 ? (recurrenciaTotal / metaTotal) * 100 : 0;
-                const totalClientes = source.length;
+                const totalClientes = fullData.length;
                 const divisorClientes = totalClientes || 1;
                 const churnPct = totalClientes > 0 ? (recurrenciaCero / totalClientes) * 100 : 0;
 
                 const estadoRows = [
                     {
                         estado: "Vivo",
-                        clientes: source.filter(d => d.cuentaViva === 1).length,
-                        meta: source.filter(d => d.cuentaViva === 1).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
+                        clientes: fullData.filter(d => d.cuentaViva === 1).length,
+                        meta: fullData.filter(d => d.cuentaViva === 1).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
                     },
                     {
                         estado: "Pausado",
-                        clientes: source.filter(d => d.cuentaViva === 2).length,
-                        meta: source.filter(d => d.cuentaViva === 2).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
+                        clientes: fullData.filter(d => d.cuentaViva === 2).length,
+                        meta: fullData.filter(d => d.cuentaViva === 2).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
                     },
                     {
                         estado: "Cerrado",
-                        clientes: source.filter(d => d.cuentaViva === 0).length,
-                        meta: source.filter(d => d.cuentaViva === 0).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
+                        clientes: fullData.filter(d => d.cuentaViva === 0).length,
+                        meta: fullData.filter(d => d.cuentaViva === 0).reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0)
                     }
                 ];
 
-                const definicionMap = source.reduce((acc, item) => {
+                const definicionMap = fullData.reduce((acc, item) => {
                     const key = (item.definicion || "#N/D").trim() || "#N/D";
                     acc[key] = (acc[key] || 0) + 1;
                     return acc;
                 }, {});
-                const prioritySummaryRows = Object.values(
-                    source.reduce((acc, item) => {
-                        if (getFocoEtiqueta(item) !== priorityLabel) return acc;
-                        const def = (item.definicion || "#N/D").trim() || "#N/D";
-                        if (!acc[def]) {
-                            acc[def] = { definicion: def, cantidad: 0, meta: 0, recurrencia: 0 };
-                        }
-                        acc[def].cantidad += 1;
-                        acc[def].meta += parseFloat(item.valorMensual) || 0;
-                        acc[def].recurrencia += parseFloat(item.recurrencia) || 0;
-                        return acc;
-                    }, {})
-                ).sort((a, b) => b.cantidad - a.cantidad);
                 const definicionData = Object.entries(definicionMap)
                     .map(([label, value]) => ({ label, value }))
                     .sort((a, b) => b.value - a.value);
@@ -197,11 +422,25 @@
                     [139, 92, 246]
                 ];
 
+                // Totales del foco (para la tabla de detalle)
+                const totalFocoMeta = source.reduce(
+                (acc, item) => acc + (parseFloat(item.valorMensual) || 0),
+                 0
+                );   
+                const totalFocoRec = source.reduce(
+                (acc, item) => acc + (parseFloat(item.recurrencia) || 0),
+                0
+                );    
+
                 const { jsPDF } = window.jspdf;
                 const doc = new jsPDF("p", "mm", "a4");
                 const pageW = doc.internal.pageSize.getWidth();
                 const margin = 12;
+                const summary = recuperoSummary && typeof recuperoSummary === "object"
+                    ? recuperoSummary
+                    : { totalIngresadas: 0, recuperadas: 0, perdidas: 0, pendientes: 0, tasaRecuperacion: 0 };
 
+                // ========== PÃGINA 1 ==========
                 doc.setFillColor(15, 23, 42);
                 doc.rect(0, 0, pageW, 28, "F");
                 doc.setTextColor(255, 255, 255);
@@ -320,52 +559,206 @@
                 doc.setFontSize(11);
                 doc.text(`${recurrenciaCero} de ${totalClientes} clientes (${churnPct.toFixed(1)}%)`, margin + 3, churnY + 15);
 
+                if (summary.totalIngresadas > 0) {
+                    const resumenY = 218;
+                    const resumenW = pageW - margin * 2;
+                    const bloqueW = (resumenW - 9) / 4;
+                    doc.setFillColor(239, 246, 255);
+                    doc.setDrawColor(147, 197, 253);
+                    doc.roundedRect(margin, resumenY, resumenW, 30, 2, 2, "FD");
+                    doc.setTextColor(30, 64, 175);
+                    doc.setFont("helvetica", "bold");
+                    doc.setFontSize(10);
+                    doc.text("Resumen de Recupero", margin + 3, resumenY + 7);
+
+                    [
+                        { label: "Ingresadas", value: String(summary.totalIngresadas) },
+                        { label: "Recuperadas", value: String(summary.recuperadas) },
+                        { label: "Perdidas", value: String(summary.perdidas) },
+                        { label: "Pendientes", value: String(summary.pendientes) }
+                    ].forEach((item, index) => {
+                        const x = margin + 3 + index * (bloqueW + 3);
+                        doc.setTextColor(100, 116, 139);
+                        doc.setFontSize(7);
+                        doc.text(item.label, x, resumenY + 13);
+                        doc.setTextColor(15, 23, 42);
+                        doc.setFontSize(10);
+                        doc.text(item.value, x, resumenY + 20);
+                    });
+
+                    doc.setTextColor(59, 130, 246);
+                    doc.setFontSize(8);
+                    doc.text(`Tasa de recuperacion: ${summary.tasaRecuperacion.toFixed(1)}%`, margin + 3, resumenY + 29);
+                }
+
                 doc.setFontSize(8);
                 doc.setTextColor(148, 163, 184);
                 doc.text("Generado automaticamente por CRM Elite Systems", margin, 288);
 
+                // ========== PÃGINA 2 ==========
                 doc.addPage();
                 doc.setFillColor(15, 23, 42);
                 doc.rect(0, 0, pageW, 22, "F");
                 doc.setTextColor(255, 255, 255);
                 doc.setFont("helvetica", "bold");
-                doc.setFontSize(13);
-                doc.text("Detalle de Prioridades", margin, 14);
+                doc.setFontSize(12);
+                doc.text("Detalle del Foco EstratÃ©gico", margin, 14); // TÃ­tulo actualizado
 
                 const pTableX = margin;
-                const pTableY = 30;
+                let pTableY = 30;
                 const pTableW = pageW - margin * 2;
-                const pRowH = 8;
-                const colDef = pTableX + 3;
-                const colCant = pTableX + 70;
-                const colMetaP = pTableX + 95;
-                const colRecP = pTableX + 135;
+                const pRowH = 6;
+                // Variables especÃ­ficas para pÃ¡gina 2 (con sufijo P para evitar conflicto)
+                const colIdP = pTableX + 3;
+                const colNombreP = pTableX + 30;
+                const colMetaP = pTableX + 80;
+                const colRecP = pTableX + 115;
+                const colDefP = pTableX + 150;
 
-                doc.setDrawColor(203, 213, 225);
-                doc.setFillColor(248, 250, 252);
-                doc.roundedRect(pTableX, pTableY, pTableW, 10 + Math.max(1, prioritySummaryRows.length) * pRowH, 2, 2, "FD");
+                // Cabecera de la tabla
                 doc.setFillColor(226, 232, 240);
-                doc.rect(pTableX + 2, pTableY + 3, pTableW - 4, pRowH - 1, "F");
+                doc.rect(pTableX + 2, pTableY, pTableW - 4, pRowH, "F");
                 doc.setTextColor(15, 23, 42);
-                doc.setFontSize(8);
-                doc.text("Definicion", colDef, pTableY + 8);
-                doc.text("Cantidad", colCant, pTableY + 8);
-                doc.text("Meta", colMetaP, pTableY + 8);
-                doc.text("Recurrencia", colRecP, pTableY + 8);
+                doc.setFontSize(7);
+                doc.setFont("helvetica", "bold");
+                doc.text("ID", colIdP, pTableY + 5);
+                doc.text("Cliente", colNombreP, pTableY + 5);
+                doc.text("Meta", colMetaP, pTableY + 5);
+                doc.text("Recurrencia", colRecP, pTableY + 5);
+                doc.text("Definicion", colDefP, pTableY + 5);
 
-                if (prioritySummaryRows.length === 0) {
-                    doc.setTextColor(100, 116, 139);
-                    doc.text("No hay prioridades para mostrar.", pTableX + 3, pTableY + 16);
-                } else {
-                    prioritySummaryRows.forEach((row, idx) => {
-                        const y = pTableY + 3 + pRowH + idx * pRowH;
+                let y = pTableY + pRowH;
+                const pageHeight = doc.internal.pageSize.getHeight();
+                const bottomLimit = pageHeight - 20; // margen inferior seguro
+
+                source.forEach((item, idx) => {
+
+            // SALTO AUTOMATICO DE PAGINA
+                if (y > bottomLimit) {
+
+                doc.addPage();
+
+                doc.setFillColor(15, 23, 42);
+                doc.rect(0, 0, pageW, 22, "F");
+
+                doc.setTextColor(255, 255, 255);
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(13);
+                doc.text("Detalle del Foco EstratÃ©gico (continuaciÃ³n)", margin, 14);
+
+            // reiniciar tabla
+                pTableY = 30;
+                y = pTableY + pRowH;
+
+            // redibujar cabecera
+                doc.setFillColor(226, 232, 240);
+                doc.rect(pTableX + 2, pTableY, pTableW - 4, pRowH, "F");
+
+                doc.setTextColor(15, 23, 42);
+                doc.setFontSize(7);
+                doc.setFont("helvetica", "bold");
+
+                doc.text("ID", colIdP, pTableY + 5);
+                doc.text("Cliente", colNombreP, pTableY + 5);
+                doc.text("Meta", colMetaP, pTableY + 5);
+                doc.text("Recurrencia", colRecP, pTableY + 5);
+                doc.text("Definicion", colDefP, pTableY + 5);
+            }
+
+                doc.setDrawColor(226, 232, 240);
+                doc.line(pTableX + 2, y, pTableX + pTableW - 2, y);
+
+                doc.setTextColor(51, 65, 85);
+                doc.setFontSize(6);
+
+                doc.text(String(item.id).substring(0, 12), colIdP, y + 4);
+                doc.text(String(item.nombre).substring(0, 20), colNombreP, y + 4);
+
+                doc.text(`$${Math.round(parseFloat(item.valorMensual) || 0).toLocaleString()}`, colMetaP, y + 4);
+                doc.text(`$${Math.round(parseFloat(item.recurrencia) || 0).toLocaleString()}`, colRecP, y + 4);
+
+                doc.text((item.definicion || "#N/D").substring(0, 15), colDefP, y + 4);
+
+                 y += pRowH;
+                });
+
+                // Totales al final
+                y += 2;
+                doc.setFillColor(241, 245, 249);
+                doc.rect(pTableX + 2, y - 2, pTableW - 4, pRowH, "F");
+                doc.setTextColor(15, 23, 42);
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(7);
+                doc.text("TOTALES", colIdP, y + 4);
+                doc.text(`$${Math.round(totalFocoMeta).toLocaleString()}`, colMetaP, y + 4);
+                doc.text(`$${Math.round(totalFocoRec).toLocaleString()}`, colRecP, y + 4);
+
+                const recoveredMonitorData = Array.isArray(recoveredData) ? recoveredData : [];
+
+                if (recoveredMonitorData.length > 0) {
+                    doc.addPage();
+                    doc.setFillColor(15, 23, 42);
+                    doc.rect(0, 0, pageW, 22, "F");
+                    doc.setTextColor(255, 255, 255);
+                    doc.setFont("helvetica", "bold");
+                    doc.setFontSize(12);
+                    doc.text("Cuentas Recuperadas", margin, 14);
+
+                    const rTableX = margin;
+                    let rTableY = 30;
+                    const rTableW = pageW - margin * 2;
+                    const rRowH = 6;
+                    const rColCliente = rTableX + 3;
+                    const rColEstado = rTableX + 68;
+                    const rColRec = rTableX + 102;
+                    const rColFecha = rTableX + 138;
+                    const rColAsesor = rTableX + 168;
+
+                    const drawRecoveredHeader = () => {
+                        doc.setFillColor(226, 232, 240);
+                        doc.rect(rTableX + 2, rTableY, rTableW - 4, rRowH, "F");
+                        doc.setTextColor(15, 23, 42);
+                        doc.setFont("helvetica", "bold");
+                        doc.setFontSize(7);
+                        doc.text("Cliente", rColCliente, rTableY + 5);
+                        doc.text("Estado", rColEstado, rTableY + 5);
+                        doc.text("Valor", rColRec, rTableY + 5);
+                        doc.text("Fecha", rColFecha, rTableY + 5);
+                        doc.text("Asesor", rColAsesor, rTableY + 5);
+                    };
+
+                    drawRecoveredHeader();
+                    let rY = rTableY + rRowH;
+                    const bottomLimitRecovered = pageHeight - 20;
+
+                    recoveredMonitorData.forEach(item => {
+                        const asesor = item.asesorRecupero || item._asesorRecupero || "-";
+                        const fecha = item.fechaRecupero ? new Date(item.fechaRecupero).toLocaleDateString("es-ES") : "-";
+
+                        if (rY > bottomLimitRecovered) {
+                            doc.addPage();
+                            doc.setFillColor(15, 23, 42);
+                            doc.rect(0, 0, pageW, 22, "F");
+                            doc.setTextColor(255, 255, 255);
+                            doc.setFont("helvetica", "bold");
+                            doc.setFontSize(12);
+                            doc.text("Cuentas Recuperadas (continuacion)", margin, 14);
+                            rTableY = 30;
+                            rY = rTableY + rRowH;
+                            drawRecoveredHeader();
+                        }
+
                         doc.setDrawColor(226, 232, 240);
-                        doc.line(pTableX + 2, y + pRowH - 1, pTableX + pTableW - 2, y + pRowH - 1);
+                        doc.line(rTableX + 2, rY, rTableX + rTableW - 2, rY);
                         doc.setTextColor(51, 65, 85);
-                        doc.text(String(row.definicion), colDef, y + 6);
-                        doc.text(String(row.cantidad), colCant, y + 6);
-                        doc.text(`$${Math.round(row.meta).toLocaleString()}`, colMetaP, y + 6);
-                        doc.text(`$${Math.round(row.recurrencia).toLocaleString()}`, colRecP, y + 6);
+                        doc.setFont("helvetica", "normal");
+                        doc.setFontSize(6);
+                        doc.text(String(item.nombre || "").substring(0, 30), rColCliente, rY + 4);
+                        doc.text(String(item.estadoChurn || "").substring(0, 14), rColEstado, rY + 4);
+                        doc.text(`$${Math.round(parseFloat(item.valorRecuperado) || 0).toLocaleString()}`, rColRec, rY + 4);
+                        doc.text(String(fecha), rColFecha, rY + 4);
+                        doc.text(String(asesor).substring(0, 14), rColAsesor, rY + 4);
+                        rY += rRowH;
                     });
                 }
 
@@ -376,74 +769,527 @@
             }
         };
 
+        const exportRecuperoPdfFile = ({ recuperoData, currentUser }) => {
+            try {
+                if (!window.jspdf || !window.jspdf.jsPDF) {
+                    alert("No se pudo cargar la libreria PDF. Recarga la pagina e intenta de nuevo.");
+                    return;
+                }
+
+                const recoveredData = Array.isArray(recuperoData)
+                    ? recuperoData.filter(item => item.recuperada || item.etapaGestion === 'recuperado')
+                    : [];
+
+                if (recoveredData.length === 0) {
+                    alert("No hay recuperos cerrados para exportar.");
+                    return;
+                }
+
+                const { jsPDF } = window.jspdf;
+                const doc = new jsPDF("p", "mm", "a4");
+                const pageW = doc.internal.pageSize.getWidth();
+                const pageHeight = doc.internal.pageSize.getHeight();
+                const margin = 12;
+
+                const totalRecuperado = recoveredData.reduce((acc, item) => acc + (parseFloat(item.valorRecuperado) || 0), 0);
+                const totalOriginal = recoveredData.reduce((acc, item) => acc + (parseFloat(item.valorOriginal) || 0), 0);
+
+                doc.setFillColor(15, 23, 42);
+                doc.rect(0, 0, pageW, 28, "F");
+                doc.setTextColor(255, 255, 255);
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(16);
+                doc.text("Reporte de Recuperados", margin, 12);
+                doc.setFontSize(9);
+                doc.text(`Usuario: ${currentUser || "Todos"} | Fecha: ${new Date().toLocaleDateString("es-CO")}`, margin, 19);
+
+                const cardW = (pageW - margin * 2 - 8) / 3;
+                const drawMetricCard = (x, y, title, value) => {
+                    doc.setDrawColor(226, 232, 240);
+                    doc.setFillColor(248, 250, 252);
+                    doc.roundedRect(x, y, cardW, 18, 2, 2, "FD");
+                    doc.setTextColor(100, 116, 139);
+                    doc.setFont("helvetica", "bold");
+                    doc.setFontSize(8);
+                    doc.text(title, x + 3, y + 6);
+                    doc.setTextColor(15, 23, 42);
+                    doc.setFontSize(10);
+                    doc.text(value, x + 3, y + 13);
+                };
+
+                drawMetricCard(margin, 34, "Recuperadas", String(recoveredData.length));
+                drawMetricCard(margin + cardW + 4, 34, "Valor Original", `$${Math.round(totalOriginal).toLocaleString()}`);
+                drawMetricCard(margin + (cardW + 4) * 2, 34, "Valor Recuperado", `$${Math.round(totalRecuperado).toLocaleString()}`);
+
+                const tX = margin;
+                let tY = 60;
+                const tW = pageW - margin * 2;
+                const rowH = 6;
+                const cCliente = tX + 3;
+                const cEstado = tX + 60;
+                const cEtapa = tX + 88;
+                const cValor = tX + 128;
+                const cAsesor = tX + 162;
+
+                const drawHeader = () => {
+                    doc.setFillColor(226, 232, 240);
+                    doc.rect(tX + 2, tY, tW - 4, rowH, "F");
+                    doc.setTextColor(15, 23, 42);
+                    doc.setFont("helvetica", "bold");
+                    doc.setFontSize(7);
+                    doc.text("Cliente", cCliente, tY + 5);
+                    doc.text("Estado", cEstado, tY + 5);
+                    doc.text("Etapa", cEtapa, tY + 5);
+                    doc.text("Valor Rec.", cValor, tY + 5);
+                    doc.text("Asesor", cAsesor, tY + 5);
+                };
+
+                drawHeader();
+                let y = tY + rowH;
+                const bottomLimit = pageHeight - 20;
+
+                recoveredData.forEach(item => {
+                    const etapaLabel = item._etapaActual?.label || ETAPAS_RECUPERO_MAP.get(item.etapaGestion)?.label || item.etapaGestion || "Recuperado";
+                    const asesor = item.asesorRecupero || item._asesorRecupero || "-";
+
+                    if (y > bottomLimit) {
+                        doc.addPage();
+                        doc.setFillColor(15, 23, 42);
+                        doc.rect(0, 0, pageW, 22, "F");
+                        doc.setTextColor(255, 255, 255);
+                        doc.setFont("helvetica", "bold");
+                        doc.setFontSize(12);
+                        doc.text("Reporte de Recuperados (continuacion)", margin, 14);
+                        tY = 30;
+                        y = tY + rowH;
+                        drawHeader();
+                    }
+
+                    doc.setDrawColor(226, 232, 240);
+                    doc.line(tX + 2, y, tX + tW - 2, y);
+                    doc.setTextColor(51, 65, 85);
+                    doc.setFont("helvetica", "normal");
+                    doc.setFontSize(6);
+                    doc.text(String(item.nombre || "").substring(0, 26), cCliente, y + 4);
+                    doc.text(String(item.estadoChurn || "").substring(0, 12), cEstado, y + 4);
+                    doc.text(String(etapaLabel).substring(0, 18), cEtapa, y + 4);
+                    doc.text(`$${Math.round(parseFloat(item.valorRecuperado) || 0).toLocaleString()}`, cValor, y + 4);
+                    doc.text(String(asesor).substring(0, 16), cAsesor, y + 4);
+                    y += rowH;
+                });
+
+                doc.save(`reporte_recuperados_${new Date().toISOString().slice(0, 10)}.pdf`);
+            } catch (err) {
+                console.error("Error PDF Recupero:", err);
+                alert("Ocurrio un error al generar el PDF de recuperados.");
+            }
+        };
+
+        // ============= monitor-ui.jsx =============
+        const SlaBadge = ({ sla }) => {
+            const badgeClass = sla === "Hoy"
+                ? "bg-rose-50 text-rose-600 border border-rose-100"
+                : sla === "48h"
+                    ? "bg-amber-50 text-amber-600 border border-amber-100"
+                    : "bg-blue-50 text-blue-600 border border-blue-100";
+
+            return (
+                <span className={`text-[8px] font-black uppercase px-2 py-1 rounded-full ${badgeClass}`}>
+                    {sla}
+                </span>
+            );
+        };
+
+        const MonitorFiltersBar = ({
+            filterEstado,
+            setFilterEstado,
+            filterDefinicion,
+            setFilterDefinicion,
+            definicionesDisponibles,
+            filterOrigen,
+            setFilterOrigen,
+            filterSla,
+            setFilterSla
+        }) => (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 w-full md:w-auto">
+                <select className="bg-white px-4 py-2 rounded-xl text-[9px] font-black uppercase border border-slate-100 outline-none cursor-pointer shadow-sm flex-1" value={filterEstado} onChange={e => setFilterEstado(e.target.value)}>
+                    <option value="Todos">Ver Todos</option>
+                    <option value="Vivo">Solo Vivos</option>
+                    <option value="Pausa">En Pausa</option>
+                    <option value="Cerrado">Cerrados</option>
+                </select>
+                <select className="bg-white px-4 py-2 rounded-xl text-[9px] font-black uppercase border border-slate-100 outline-none cursor-pointer shadow-sm flex-1" value={filterDefinicion} onChange={e => setFilterDefinicion(e.target.value)}>
+                    {definicionesDisponibles.map(def => (
+                        <option key={def} value={def}>
+                            {def === "Todos" ? "Definicion: Todas" : def}
+                        </option>
+                    ))}
+                </select>
+                <select className="bg-white px-4 py-2 rounded-xl text-[9px] font-black uppercase border border-slate-100 outline-none cursor-pointer shadow-sm flex-1" value={filterOrigen} onChange={e => setFilterOrigen(e.target.value)}>
+                    <option value="Todos">Origen: Todos</option>
+                    <option value="Manual">Origen: Manual</option>
+                    <option value="Sin Prioridad">Sin Prioridad</option>
+                </select>
+                <select className="bg-white px-4 py-2 rounded-xl text-[9px] font-black uppercase border border-slate-100 outline-none cursor-pointer shadow-sm flex-1" value={filterSla} onChange={e => setFilterSla(e.target.value)}>
+                    <option value="Todos">SLA: Todos</option>
+                    <option value="Hoy">SLA: Hoy</option>
+                    <option value="48h">SLA: 48h</option>
+                    <option value="Semana">SLA: Semana</option>
+                </select>
+            </div>
+        );
+
+        const MonitorTable = ({ monitorFilteredData, currentUser, isPriority, getNivel, getSlaBucket, updateItem, setData, getEstadoTexto }) => (
+            <div className="overflow-x-auto table-container">
+                <table className="w-full text-left border-collapse">
+                    <thead>
+                        <tr className="bg-slate-50/50">
+                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase w-16 text-center">Prio</th>
+                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase">Cliente</th>
+                            {currentUser === MASTER_USER && <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-center">Consultor</th>}
+                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-center">Definicion</th>
+                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-center">SLA</th>
+                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-right">Recurrencia</th>
+                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-center w-32">Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50 text-xs">
+                        {monitorFilteredData.map(item => {
+                            const priorityType = isPriority(item);
+                            const nivel = getNivel(item);
+                            const sla = getSlaBucket(item);
+                            return (
+                                <tr key={item.id} className={`hover:bg-slate-50/50 transition-all ${nivel === 'Critico' ? 'row-critical' : nivel === 'Alerta' ? 'row-alert' : ''}`}>
+                                    <td className="p-6 text-center">
+                                        <button onClick={() => updateItem({ ...item, prioridad: !item.prioridad })} className="transition-transform active:scale-90">
+                                            <i data-lucide="star" className={`w-6 h-6 ${priorityType === 'manual' ? 'star-manual' : 'star-empty'}`}></i>
+                                        </button>
+                                    </td>
+                                    <td className="p-6">
+                                        <p className="font-extrabold text-slate-900 text-[11px] leading-tight mb-1">{item.nombre}</p>
+                                        <span className="text-[8px] font-black text-blue-600 uppercase tracking-widest bg-blue-50 px-2 py-0.5 rounded">ID: {item.id}</span>
+                                    </td>
+                                    {currentUser === MASTER_USER && (
+                                        <td className="p-6 text-center">
+                                            <span className="text-[8px] font-black text-slate-400 uppercase">{item.propietario}</span>
+                                        </td>
+                                    )}
+                                    <td className="p-6 text-center">
+                                        <span className="text-[8px] font-black text-slate-500 uppercase">{item.definicion || "#N/D"}</span>
+                                    </td>
+                                    <td className="p-6 text-center"><SlaBadge sla={sla} /></td>
+                                    <td className="p-6 text-right">
+                                        <div className="flex flex-col items-end">
+                                            <div className="flex items-center gap-1">
+                                                <span className="text-slate-300 font-bold">$</span>
+                                                <input
+                                                    type="number"
+                                                    className="w-24 bg-transparent border-b border-slate-100 text-right font-black text-xs p-1 focus:border-slate-900 outline-none"
+                                                    value={item.recurrencia}
+                                                    onBlur={e => updateItem({ ...item, recurrencia: parseFloat(e.target.value) || 0 })}
+                                                    onChange={e => {
+                                                        const val = parseFloat(e.target.value) || 0;
+                                                        setData(prev => prev.map(d => d.id === item.id ? { ...d, recurrencia: val } : d));
+                                                    }}
+                                                />
+                                            </div>
+                                            <span className="text-[8px] text-slate-400 font-bold mt-1 uppercase italic">Meta: ${item.valorMensual}</span>
+                                        </div>
+                                    </td>
+                                    <td className="p-6">
+                                        <button
+                                            onClick={() => {
+                                                const next = item.cuentaViva === 1 ? 2 : item.cuentaViva === 2 ? 0 : 1;
+                                                updateItem({ ...item, cuentaViva: next });
+                                            }}
+                                            className={`w-full py-2 rounded-xl text-[8px] font-black uppercase tracking-widest border transition-all
+                                                ${item.cuentaViva === 1 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' :
+                                                    item.cuentaViva === 2 ? 'bg-amber-50 text-amber-600 border-amber-100' :
+                                                        'bg-slate-50 text-slate-400 border-slate-200'}`}
+                                        >
+                                            {getEstadoTexto(item.cuentaViva)}
+                                        </button>
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+        );
+
+        // ============= app.jsx =============
         const App = () => {
+            // ============= 1. DATA (datos base) =============
             const [data, setData] = useState([]);
             const [loading, setLoading] = useState(true);
             const [saving, setSaving] = useState(false);
+            const [fetchError, setFetchError] = useState(null);
+
             const [searchTerm, setSearchTerm] = useState('');
             const [gestionados, setGestionados] = useState([]);
             const [filterEstado, setFilterEstado] = useState('Todos');
             const [filterDefinicion, setFilterDefinicion] = useState('Todos');
+            const [filterSla, setFilterSla] = useState('Todos');
+            const [filterOrigen, setFilterOrigen] = useState('Todos');
+            const [lastManagedAt, setLastManagedAt] = useState({});
+
             const [focoDrafts, setFocoDrafts] = useState({});
             const [showNewFocoForm, setShowNewFocoForm] = useState(false);
-            const [showRulesPanel, setShowRulesPanel] = useState(false);
-            const [autoPriorityKeywords, setAutoPriorityKeywords] = useState(DEFAULT_PRIORITY_KEYWORDS);
-            const [autoRulesInput, setAutoRulesInput] = useState(DEFAULT_PRIORITY_KEYWORDS.join(", "));
-            const [priorityLabel, setPriorityLabel] = useState(DEFAULT_PRIORITY_LABEL);
-            const [priorityColor, setPriorityColor] = useState(DEFAULT_PRIORITY_COLOR);
             const [newFocoItem, setNewFocoItem] = useState(createInitialFocoItem);
-            
-            // Estado de Autenticación
-            const [currentUser, setCurrentUser] = useState(null);
 
-            useEffect(() => { fetchData(); }, []);
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [data, loading, searchTerm, gestionados, filterEstado, currentUser]);
-            useEffect(() => {
-                const parsed = readJSONStorage(STORAGE_KEYS.autoPriority);
-                if (!Array.isArray(parsed) || parsed.length === 0) return;
-                const normalized = parsed.map(v => String(v).toLowerCase().trim()).filter(Boolean);
-                if (normalized.length > 0) {
-                    setAutoPriorityKeywords(normalized);
-                    setAutoRulesInput(normalized.join(", "));
-                }
-            }, []);
-            useEffect(() => {
-                const cfg = readJSONStorage(STORAGE_KEYS.visualConfig);
-                if (!cfg || typeof cfg !== "object") return;
-                if (cfg.label) setPriorityLabel(String(cfg.label));
-                if (cfg.color) setPriorityColor(String(cfg.color));
-            }, []);
+            const [currentUser, setCurrentUser] = useState(null);
+            const [showRulesPanel, setShowRulesPanel] = useState(false);
+            const [activeTab, setActiveTab] = useState('monitor');
+
+            const [recuperoList, setRecuperoList] = useState([]);
+            const [recuperoClosedList, setRecuperoClosedList] = useState([]);
+            const [recuperoDrafts, setRecuperoDrafts] = useState({});
+            const [asesoresRecupero, setAsesoresRecupero] = useState(() => {
+                const saved = readJSONStorage('crm_asesores_recupero');
+                return Array.isArray(saved) ? saved : [];
+            });
+            const [nuevoAsesorRecupero, setNuevoAsesorRecupero] = useState('');
+            const [recuperoScoring, setRecuperoScoring] = useState(() => {
+                const saved = readJSONStorage(STORAGE_KEYS.recuperoScoring);
+                return saved && typeof saved === 'object' ? { ...DEFAULT_RECUPERO_SCORING, ...saved } : DEFAULT_RECUPERO_SCORING;
+            });
+
+            const [scoringConfig, setScoringConfig] = useState(() => sanitizeScoringConfig(readJSONStorage(STORAGE_KEYS.scoringConfig) || DEFAULT_SCORING_CONFIG));
+            const [priorityLabel, setPriorityLabel] = useState(() => {
+                const visual = readJSONStorage(STORAGE_KEYS.visualConfig);
+                return visual?.label || DEFAULT_PRIORITY_LABEL;
+            });
+            const [priorityColor, setPriorityColor] = useState(() => {
+                const visual = readJSONStorage(STORAGE_KEYS.visualConfig);
+                return visual?.color || DEFAULT_PRIORITY_COLOR;
+            });
+            const [autoRulesInput, setAutoRulesInput] = useState(() =>
+                scoringConfig.keywordRules.map(rule => `${rule.keyword}:${rule.points}`).join(", ")
+            );
 
             const fetchData = async () => {
                 try {
                     setLoading(true);
-                    const response = await fetch(GOOGLE_SCRIPT_URL);
-                    const json = await response.json();
-                    const rows = Array.isArray(json) ? json : [];
-                    setData(rows.map(normalizeItem));
-                } catch (e) { console.error("Error fetching:", e); } finally { setLoading(false); }
+                    setFetchError(null);
+                    const response = await fetch(GOOGLE_SCRIPT_URL, {
+                        method: 'GET',
+                        redirect: 'follow'
+                    });
+                    const text = await response.text();
+                    let json;
+                    try {
+                        json = JSON.parse(text);
+                    } catch(parseErr) {
+                        throw new Error('Respuesta no es JSON vÃ¡lido: ' + text.substring(0, 200));
+                    }
+
+                    // El script devuelve { bd: [...], recupero: [...], recuperoCerrados: [...] }
+                    // pero soportamos tambiÃ©n el formato antiguo (array directo)
+                    if (Array.isArray(json)) {
+                        setData(json.map(normalizeItem));
+                    } else if (json && Array.isArray(json.bd)) {
+                        setData(json.bd.map(normalizeItem));
+                        setRecuperoList(Array.isArray(json.recupero) ? json.recupero.map(r => normalizeRecuperoItem({ ...r, recuperada: false })) : []);
+                        setRecuperoClosedList(Array.isArray(json.recuperoCerrados) ? json.recuperoCerrados.map(r => normalizeRecuperoItem({ ...r, recuperada: true })) : []);
+                    } else {
+                        throw new Error('Formato de respuesta inesperado: ' + JSON.stringify(json).substring(0, 200));
+                    }
+                } catch (e) {
+                    console.error("Error fetching:", e);
+                    setFetchError(e.message || String(e));
+                } finally {
+                    setLoading(false);
+                }
             };
+
+            useEffect(() => { fetchData(); }, []);
+
+            // Detectar acuerdos vencidos automÃ¡ticamente al cargar y cada hora
+            useEffect(() => {
+                const checkVencidos = () => {
+                    setRecuperoList(prev => prev.map(r => {
+                        if (r.etapaGestion === 'acuerdo_pago' && isAcuerdoVencido(r) && !r.recuperada) {
+                            return { ...r, _acuerdoVencido: true };
+                        }
+                        return { ...r, _acuerdoVencido: false };
+                    }));
+                };
+                checkVencidos();
+                const interval = setInterval(checkVencidos, 60 * 60 * 1000);
+                return () => clearInterval(interval);
+            }, [recuperoList.length]);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [
+                loading,
+                currentUser,
+                activeTab,
+                showRulesPanel,
+                data.length,
+                recuperoList.length,
+                asesoresRecupero.length
+            ]);
+            useEffect(() => {
+                const managed = readJSONStorage(STORAGE_KEYS.auditManagedAt);
+                if (!managed || typeof managed !== "object") return;
+                setLastManagedAt(managed);
+            }, []);
 
             const updateItem = async (updatedItem, isClosing = false) => {
                 setSaving(true);
                 const finalItem = isClosing ? { ...updatedItem, prioridad: false } : updatedItem;
-                if (isClosing) setGestionados(prev => [...prev, finalItem.id]);
-                
-                setData(prev => {
-                    const exists = prev.some(d => String(d.id) === String(finalItem.id));
-                    if (exists) return prev.map(d => String(d.id) === String(finalItem.id) ? finalItem : d);
-                    return [finalItem, ...prev];
+                if (isClosing) {
+                    setGestionados(prev => [...prev, finalItem.id]);
+                    setLastManagedAt(prev => {
+                        const next = { ...prev, [String(finalItem.id)]: Date.now() };
+                        writeJSONStorage(STORAGE_KEYS.auditManagedAt, next);
+                        return next;
+                    });
+                }
+
+                // --- BOLSA DE RECUPERO: detectar cambio a pausado (2) o cerrado (0) ---
+                setData(prevData => {
+                    const existing = prevData.find(d => String(d.id) === String(finalItem.id));
+                    const wasVivo = existing && existing.cuentaViva === 1;
+                    const nowInactivo = finalItem.cuentaViva === 0 || finalItem.cuentaViva === 2;
+                    if (wasVivo && nowInactivo) {
+                        setRecuperoList(prev => {
+                            const alreadyIn = prev.some(r => String(r.id) === String(finalItem.id));
+                            if (alreadyIn) return prev;
+                            return [{
+                                id: finalItem.id,
+                                nombre: finalItem.nombre,
+                                propietarioOriginal: finalItem.propietario || "",
+                                valorOriginal: parseFloat(finalItem.valorMensual) || 0,
+                                valorRecuperado: parseFloat(finalItem.valorMensual) || 0,
+                                estadoChurn: finalItem.cuentaViva === 2 ? "Pausado" : "Cerrado",
+                                asesorRecupero: "",
+                                notaRecupero: "",
+                                fechaIngreso: Date.now(),
+                                recuperada: false,
+                                definicion: finalItem.definicion || "#N/D"
+                            }, ...prev];
+                        });
+                    }
+                    const exists = prevData.some(d => String(d.id) === String(finalItem.id));
+                    if (exists) return prevData.map(d => String(d.id) === String(finalItem.id) ? finalItem : d);
+                    return [finalItem, ...prevData];
                 });
-                
+                // --- FIN BOLSA ---
+
                 try {
                     await fetch(GOOGLE_SCRIPT_URL, {
                         method: 'POST',
                         mode: 'no-cors',
                         body: JSON.stringify(finalItem)
                     });
-                } catch (e) { console.error("Error updating:", e); } finally { 
-                    setTimeout(() => setSaving(false), 300); 
+                } catch (e) {
+                    console.error("Error updating:", e);
+                } finally {
+                    setTimeout(() => setSaving(false), 300);
                 }
+            };
+
+            // Guardar gestion de recupero (cualquier etapa)
+            const guardarGestionRecupero = async (recuperoItem) => {
+                const draft = recuperoDrafts[recuperoItem.id] || {};
+                const merged = { ...recuperoItem, ...draft };
+                const asesor = merged.asesorRecupero || '';
+                const etapa  = merged.etapaGestion   || '';
+
+                if (!asesor) { alert("Debes indicar el asesor de recupero."); return; }
+                if (!etapa)  { alert("Debes seleccionar una etapa de gestion."); return; }
+                if (!String(merged.notaRecupero || "").trim()) {
+                    alert("Debes escribir un comentario de gestion.");
+                    return;
+                }
+
+                // Validar fecha si es acuerdo de pago
+                if (etapa === 'acuerdo_pago' && !merged.fechaAcuerdo) {
+                    alert("Debes ingresar la fecha del acuerdo de pago.");
+                    return;
+                }
+
+                const esFinal    = etapa === 'recuperado' || etapa === 'perdido_definitivo';
+                const valorRec   = parseFloat(merged.valorRecuperado) || 0;
+                const etapaLabel = ETAPAS_RECUPERO.find(e => e.id === etapa)?.label || etapa;
+
+                if (etapa === 'recuperado' && valorRec <= 0) {
+                    alert("Debes ingresar un valor recuperado mayor a 0 para marcar la cuenta como recuperada.");
+                    return;
+                }
+
+                const payload = {
+                    id:               recuperoItem.id,
+                    nombre:           recuperoItem.nombre,
+                    propietario:      recuperoItem.propietarioOriginal,
+                    definicion:       recuperoItem.definicion,
+                    estadoChurn:      recuperoItem.estadoChurn,
+                    _accion:          "recupero",
+                    _valorOriginal:   merged.valorOriginal,
+                    _valorRecuperado: valorRec,
+                    _diferencia:      merged.valorOriginal - valorRec,
+                    _asesorRecupero:  asesor,
+                    _notaRecupero:    merged.notaRecupero || "",
+                    _etapaGestion:    etapaLabel,
+                    _fechaAcuerdo:    etapa === 'acuerdo_pago' ? merged.fechaAcuerdo : "",
+                    _fechaRecupero:   new Date().toISOString()
+                };
+
+                // Si es etapa final, incluir datos para actualizar BD
+                if (esFinal) {
+                    payload.cuentaViva = etapa === 'recuperado' ? 1 : 0;
+                    payload.recurrencia = etapa === 'recuperado' ? valorRec : 0;
+                    payload.actividad = `[${etapaLabel}] por ${asesor}. Valor original: $${merged.valorOriginal}. Valor recuperado: $${valorRec}. ${merged.notaRecupero || ""}`.trim();
+                }
+
+                // Actualizar BD local si es final
+                if (esFinal) {
+                    const cuentaOriginal = data.find(d => String(d.id) === String(recuperoItem.id));
+                    if (cuentaOriginal) {
+                        setData(prev => prev.map(d => String(d.id) === String(recuperoItem.id)
+                            ? { ...d, cuentaViva: etapa === 'recuperado' ? 1 : 0, recurrencia: etapa === 'recuperado' ? valorRec : 0 }
+                            : d
+                        ));
+                    }
+                }
+
+                // Actualizar bolsa local
+                const closedItem = {
+                    ...recuperoItem,
+                    ...draft,
+                    etapaGestion: etapa,
+                    recuperada: esFinal,
+                    fechaRecupero: Date.now(),
+                    valorRecuperado: valorRec,
+                    asesorRecupero: asesor,
+                    notaRecupero: merged.notaRecupero || "",
+                    fechaAcuerdo: etapa === 'acuerdo_pago' ? merged.fechaAcuerdo : ""
+                };
+
+                if (esFinal) {
+                    setRecuperoList(prev => prev.filter(r => String(r.id) !== String(recuperoItem.id)));
+                    setRecuperoClosedList(prev => {
+                        const next = prev.filter(r => String(r.id) !== String(recuperoItem.id));
+                        return [closedItem, ...next];
+                    });
+                } else {
+                    setRecuperoList(prev => prev.map(r => String(r.id) === String(recuperoItem.id)
+                        ? closedItem
+                        : r
+                    ));
+                }
+                setRecuperoDrafts(prev => { const n = {...prev}; delete n[recuperoItem.id]; return n; });
+
+                setSaving(true);
+                fetch(GOOGLE_SCRIPT_URL, {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    body: JSON.stringify(payload)
+                })
+                    .catch(e => console.error("Error gestion:", e))
+                    .finally(() => {
+                        setTimeout(() => setSaving(false), 300);
+                    });
             };
 
             const createNewFromFoco = async () => {
@@ -469,7 +1315,7 @@
                     propietario: currentUser === MASTER_USER ? "Master" : currentUser,
                     actividad: String(newFocoItem.actividad || "").trim(),
                     definicion: String(newFocoItem.definicion || "#N/D").trim() || "#N/D",
-                    prioridad: true
+                    prioridad: false
                 };
 
                 await updateItem(newItem, false);
@@ -477,29 +1323,47 @@
                 setNewFocoItem(createInitialFocoItem());
             };
 
-            const isPriority = (item) => {
-                if (item.prioridad) return "manual";
-                if (matchesAutoPriorityRule(item)) return "auto";
-                if (item.cuentaViva === 1 && (item.recurrencia === 0 || item.recurrencia === 2)) return "auto";
-                if (item.cuentaViva === 1 && item.recurrencia < (item.valorMensual * 0.5)) return "auto";
-                return null;
+            // ============= 2. DERIVED DATA (cÃ¡lculos) =============
+            const calculateItemScore = (item) => {
+                const recurrencia = parseFloat(item.recurrencia) || 0;
+                const meta = parseFloat(item.valorMensual) || 0;
+                const definicion = String(item.definicion || "").toLowerCase();
+
+                let score = 0;
+                if (item.prioridad) score += scoringConfig.points.manual;
+                if (recurrencia === 0) score += scoringConfig.points.recurrenciaCero;
+                if (item.cuentaViva === 2 && (recurrencia === 0 || recurrencia === 2)) score += scoringConfig.points.pausaSinRecurrencia;
+                if (item.cuentaViva === 1 && meta > 0 && recurrencia < (meta * 0.5)) score += scoringConfig.points.recurrenciaBaja;
+
+                const keywordsScore = scoringConfig.keywordRules.reduce((acc, rule) => {
+                    if (!rule.keyword) return acc;
+                    return definicion.includes(rule.keyword) ? acc + (parseInt(rule.points, 10) || 0) : acc;
+                }, 0);
+
+                const baseScore = score + keywordsScore;
+                if (!item.prioridad) return baseScore;
+                if (definicion.includes("flujo comercial")) return baseScore * 1.25;
+                if (definicion.includes("stock")) return baseScore * 1.15;
+                return baseScore;
             };
 
-            const matchesAutoPriorityRule = (item) => {
-                const def = String(item.definicion || "").toLowerCase();
-                return autoPriorityKeywords.some(k => k && def.includes(k));
+            const isPriority = (item) => {
+                return item.prioridad ? "manual" : null;
             };
 
             const getFocoEtiqueta = (item) => {
-                if (item.prioridad || matchesAutoPriorityRule(item)) return priorityLabel;
-                if ((parseFloat(item.recurrencia) || 0) === 0) return "Critico";
+                if (item.prioridad) return priorityLabel;
+                const score = calculateItemScore(item);
+                if (score >= scoringConfig.thresholds.critico) return "Critico";
                 return "Normal";
             };
 
             const getNivel = (item) => {
-                if (item.prioridad === true) return "Urgente";
-                if (item.cuentaViva === 2 && (item.recurrencia === 0 || item.recurrencia === 2)) return "Critico";
-                if (item.cuentaViva === 1 && item.recurrencia < (item.valorMensual * 0.5)) return "Alerta";
+                const score = calculateItemScore(item);
+                const alertThreshold = Math.max(1, Math.floor(scoringConfig.thresholds.critico * 0.6));
+                if (score >= scoringConfig.thresholds.prioridad) return "Urgente";
+                if (score >= scoringConfig.thresholds.critico) return "Critico";
+                if (score >= alertThreshold) return "Alerta";
                 return "Normal";
             };
 
@@ -509,6 +1373,25 @@
                 return "Cerrado";
             };
 
+            const getSlaBucket = (item) => {
+                const managedAt = parseInt(lastManagedAt[String(item.id)], 10);
+                const nivel = getNivel(item);
+                if (!Number.isFinite(managedAt)) {
+                    if (nivel === "Urgente") return "Hoy";
+                    if (nivel === "Critico") return "48h";
+                    return "Semana";
+                }
+                const elapsedHours = (Date.now() - managedAt) / (1000 * 60 * 60);
+                if (elapsedHours <= 24) return "Hoy";
+                if (elapsedHours <= 48) return "48h";
+                return "Semana";
+            };
+
+            const currentUserRol = currentUser === MASTER_USER ? 'master'
+                : asesoresRecupero.includes(currentUser) ? 'recupero'
+                : 'consultor';
+
+            // ============= 3. VIEW DATA (ordenamiento, filtros, mÃ©tricas) =============
             const propietariosDisponibles = useMemo(() => {
                 const unique = [...new Set(data.map(d => d.propietario))]
                     .filter(Boolean)
@@ -517,151 +1400,463 @@
                 return [MASTER_USER, ...unique];
             }, [data]);
 
-            // Filtrado por Usuario (Logica Central)
             const userFilteredData = useMemo(() => {
                 if (!currentUser || currentUser === MASTER_USER) return data;
                 return data.filter(d => d.propietario === currentUser);
             }, [data, currentUser]);
 
-            const definicionesDisponibles = useMemo(() => {
-                return [
-                    "Todos",
-                    "Flujo Cobranzas",
-                    "Flujo Comercial",
-                    "Stock Cobranzas",
-                    "Stock Comercial",
-                    "#N/D"
-                ];
-            }, []);
-
-            const metrics = useMemo(() => {
-                const target = userFilteredData.reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0);
-                const real = userFilteredData.reduce((a, b) => a + (parseFloat(b.recurrencia) || 0), 0);
-                const criticos = userFilteredData.filter(d => getNivel(d) === "Critico").length;
-                const avance = target > 0 ? (real / target) * 100 : 0;
-                return { target, real, criticos, avance };
-            }, [userFilteredData]);
+            const definicionesDisponibles = useMemo(() => ([
+                "Todos",
+                "Flujo Cobranzas",
+                "Flujo Comercial",
+                "Stock Cobranzas",
+                "Stock Comercial",
+                "#N/D"
+            ]), []);
 
             const finalData = useMemo(() => {
                 return userFilteredData.filter(d => {
-                    const matchSearch = d.nombre.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                                      String(d.id).includes(searchTerm);
+                    const matchSearch = d.nombre.toLowerCase().includes(searchTerm.toLowerCase()) || String(d.id).includes(searchTerm);
                     const matchEstado = filterEstado === 'Todos' || getEstadoTexto(d.cuentaViva) === filterEstado;
                     const matchDefinicion = filterDefinicion === 'Todos' || d.definicion === filterDefinicion;
                     return matchSearch && matchEstado && matchDefinicion;
                 });
             }, [userFilteredData, searchTerm, filterEstado, filterDefinicion]);
 
+            // ***** FOCO ESTRATÃ‰GICO: manuales + automÃ¡ticos que superan umbral de prioridad *****
             const focoEstrategico = useMemo(() => {
-                const getFocoRank = (item) => {
-                    const etiqueta = getFocoEtiqueta(item);
-                    if (etiqueta === priorityLabel) return 1;
-                    if (etiqueta === "Critico") return 2;
-                    return 3;
-                };
-
-                return finalData
-                    .filter(d => getFocoEtiqueta(d) !== "Normal" && !gestionados.includes(d.id))
+                const noGestionados = finalData.filter(d => !gestionados.includes(d.id));
+                return noGestionados
+                    .filter(d => d.prioridad || calculateItemScore(d) >= scoringConfig.thresholds.prioridad)
                     .slice()
                     .sort((a, b) => {
-                        const rankDiff = getFocoRank(a) - getFocoRank(b);
-                        if (rankDiff !== 0) return rankDiff;
+                        if (a.prioridad && !b.prioridad) return -1;
+                        if (!a.prioridad && b.prioridad) return 1;
+                        const scoreDiff = calculateItemScore(b) - calculateItemScore(a);
+                        if (scoreDiff !== 0) return scoreDiff;
                         return String(a.nombre || "").localeCompare(String(b.nombre || ""));
                     });
-            }, [finalData, gestionados, autoPriorityKeywords, priorityLabel]);
+            }, [finalData, gestionados, scoringConfig]);
 
-            const saveAutoPriorityRules = () => {
-                const parsed = autoRulesInput
-                    .split(",")
-                    .map(v => v.toLowerCase().trim())
-                    .filter(Boolean);
-                if (parsed.length === 0) {
-                    alert("Debes ingresar al menos una regla.");
-                    return;
-                }
-                setAutoPriorityKeywords(parsed);
-                writeJSONStorage(STORAGE_KEYS.autoPriority, parsed);
+            // ***** MÃ‰TRICAS: crÃ­ticos ahora usa focoEstrategico.length *****
+            const metrics = useMemo(() => {
+                const target = userFilteredData.reduce((a, b) => a + (parseFloat(b.valorMensual) || 0), 0);
+                const real = userFilteredData.reduce((a, b) => a + (parseFloat(b.recurrencia) || 0), 0);
+                const criticos = focoEstrategico.length;   // â† cambio importante
+                const avance = target > 0 ? (real / target) * 100 : 0;
+                return { target, real, criticos, avance };
+            }, [userFilteredData, focoEstrategico]);
+
+            const monitorAuditoriaData = useMemo(() => {
+                const manualesEnFocoIds = new Set(
+                    focoEstrategico.filter(item => item.prioridad).map(item => String(item.id))
+                );
+                return finalData.filter(item => !manualesEnFocoIds.has(String(item.id)));
+            }, [finalData, focoEstrategico]);
+
+            const recuperoStats = useMemo(() => {
+                const pendientes = recuperoList.length;
+                const recuperadas = recuperoClosedList.filter(item => isRecuperoRecoveredStage(item.etapaGestion)).length;
+                const valorEnRiesgo = recuperoList.reduce((acc, item) => acc + (item.valorOriginal || 0), 0);
+                return { pendientes, recuperadas, valorEnRiesgo };
+            }, [recuperoList, recuperoClosedList]);
+
+            const recuperoSummary = useMemo(() => {
+                const closedVisibleItems = currentUser === MASTER_USER
+                    ? recuperoClosedList
+                    : recuperoClosedList.filter(item => item.propietarioOriginal === currentUser);
+                const activeVisibleItems = currentUser === MASTER_USER
+                    ? recuperoList
+                    : recuperoList.filter(item => item.propietarioOriginal === currentUser);
+
+                const recuperadas = closedVisibleItems.filter(item => isRecuperoRecoveredStage(item.etapaGestion)).length;
+                const perdidas = closedVisibleItems.filter(item => isRecuperoLostStage(item.etapaGestion)).length;
+                const pendientes = activeVisibleItems.length;
+                const totalIngresadas = recuperadas + perdidas + pendientes;
+                const tasaRecuperacion = totalIngresadas > 0 ? (recuperadas / totalIngresadas) * 100 : 0;
+
+                return { totalIngresadas, recuperadas, perdidas, pendientes, tasaRecuperacion };
+            }, [currentUser, recuperoClosedList, recuperoList]);
+
+            const recuperoViewMap = useMemo(() => {
+                return recuperoList.reduce((acc, rec) => {
+                    const draft = recuperoDrafts[rec.id] || {};
+                    const merged = { ...rec, ...draft };
+                    const acuerdoVencido = merged.etapaGestion === 'acuerdo_pago' && isAcuerdoVencido(merged) && !merged.recuperada;
+                    const etapaEfectiva = acuerdoVencido ? 'acuerdo_vencido' : merged.etapaGestion;
+                    const valorRec = parseFloat(merged.valorRecuperado) || 0;
+                    const diferencia = (merged.valorOriginal || 0) - valorRec;
+                    const etapaActual = ETAPAS_RECUPERO_MAP.get(etapaEfectiva);
+                    const esFinal = merged.etapaGestion === 'recuperado' || merged.etapaGestion === 'perdido_definitivo';
+
+                    acc[rec.id] = {
+                        ...merged,
+                        _acuerdoVencido: acuerdoVencido,
+                        _etapaEfectiva: etapaEfectiva,
+                        _draft: draft,
+                        _valorRec: valorRec,
+                        _diferencia: diferencia,
+                        _etapaActual: etapaActual,
+                        _esFinal: esFinal,
+                        _valorRecuperadoInputEmpty: merged.valorRecuperado === 0 && !draft.valorRecuperado
+                    };
+                    return acc;
+                }, {});
+            }, [recuperoList, recuperoDrafts]);
+
+            const sortedRecuperoList = useMemo(() => {
+                return [...recuperoList].sort((a, b) => compareRecuperoPanelItems(a, b, recuperoScoring));
+            }, [recuperoList, recuperoScoring]);
+
+            const recoveredRecuperoData = useMemo(() => {
+                const activeRecoveredItems = sortedRecuperoList
+                    .map(item => recuperoViewMap[item.id] || item)
+                    .filter(item => item.recuperada || item.etapaGestion === 'recuperado');
+                const recoveredItemsMap = new Map();
+
+                [...recuperoClosedList, ...activeRecoveredItems].forEach(item => {
+                    recoveredItemsMap.set(String(item.id), item);
+                });
+
+                const recoveredItems = [...recoveredItemsMap.values()];
+
+                if (!currentUser || currentUser === MASTER_USER) return recoveredItems;
+                return recoveredItems.filter(item => item.propietarioOriginal === currentUser);
+            }, [sortedRecuperoList, recuperoViewMap, recuperoClosedList, currentUser]);
+
+            const monitorFilteredData = useMemo(() => {
+                return monitorAuditoriaData.filter(item => {
+                    const priorityType = isPriority(item);
+                    const origen = getOrigenSegment(priorityType);
+                    const matchOrigen = filterOrigen === "Todos" || origen === filterOrigen;
+                    const sla = getSlaBucket(item);
+                    const matchSla = filterSla === "Todos" || sla === filterSla;
+                    return matchOrigen && matchSla;
+                });
+            }, [monitorAuditoriaData, filterOrigen, filterSla, lastManagedAt]);
+
+            const updateKeywordRule = (ruleId, patch) => {
+                setScoringConfig(prev => ({
+                    ...prev,
+                    keywordRules: prev.keywordRules.map(rule => rule.id === ruleId ? { ...rule, ...patch } : rule)
+                }));
+            };
+
+            const addKeywordRule = () => {
+                setScoringConfig(prev => ({
+                    ...prev,
+                    keywordRules: [...prev.keywordRules, createScoreRule("", 20)]
+                }));
+            };
+
+            const removeKeywordRule = (ruleId) => {
+                setScoringConfig(prev => {
+                    if (prev.keywordRules.length <= MIN_KEYWORD_RULES) {
+                        alert(`Debes mantener al menos ${MIN_KEYWORD_RULES} reglas.`);
+                        return prev;
+                    }
+                    return {
+                        ...prev,
+                        keywordRules: prev.keywordRules.filter(rule => rule.id !== ruleId)
+                    };
+                });
+            };
+
+            const saveScoringRules = () => {
+                const cleanedConfig = sanitizeScoringConfig(scoringConfig);
+                setScoringConfig(cleanedConfig);
+                setAutoRulesInput(cleanedConfig.keywordRules.map(rule => `${rule.keyword}:${rule.points}`).join(", "));
+                writeJSONStorage(STORAGE_KEYS.scoringConfig, cleanedConfig);
                 writeJSONStorage(STORAGE_KEYS.visualConfig, {
                     label: priorityLabel || DEFAULT_PRIORITY_LABEL,
                     color: priorityColor || DEFAULT_PRIORITY_COLOR
                 });
-                alert("Reglas actualizadas.");
+                alert("Scoring actualizado.");
             };
 
-            const clearAutoPriorityRules = () => {
-                setAutoPriorityKeywords([]);
-                setAutoRulesInput("");
+            const clearScoringRules = () => {
+                setScoringConfig(DEFAULT_SCORING_CONFIG);
+                setAutoRulesInput(DEFAULT_SCORING_CONFIG.keywordRules.map(rule => `${rule.keyword}:${rule.points}`).join(", "));
                 setPriorityLabel(DEFAULT_PRIORITY_LABEL);
                 setPriorityColor(DEFAULT_PRIORITY_COLOR);
-                localStorage.removeItem(STORAGE_KEYS.autoPriority);
+                localStorage.removeItem(STORAGE_KEYS.scoringConfig);
                 localStorage.removeItem(STORAGE_KEYS.visualConfig);
-                alert("Reglas eliminadas.");
-            };
-
-            const applyAutomaticPriorities = async () => {
-                const targets = userFilteredData.filter(item => matchesAutoPriorityRule(item) && !item.prioridad);
-                if (targets.length === 0) {
-                    alert("No hay registros para aplicar prioridad automática.");
-                    return;
-                }
-
-                setSaving(true);
-                const targetIds = new Set(targets.map(t => String(t.id)));
-                setData(prev => prev.map(item => targetIds.has(String(item.id)) ? { ...item, prioridad: true } : item));
-
-                try {
-                    await Promise.all(
-                        targets.map(item => fetch(GOOGLE_SCRIPT_URL, {
-                            method: "POST",
-                            mode: "no-cors",
-                            body: JSON.stringify({ ...item, prioridad: true })
-                        }))
-                    );
-                    alert(`Prioridades automáticas aplicadas: ${targets.length}`);
-                } catch (e) {
-                    console.error("Error applying automatic priorities:", e);
-                    alert("Ocurrió un error aplicando prioridades automáticas.");
-                } finally {
-                    setTimeout(() => setSaving(false), 300);
-                }
+                alert("Scoring restablecido.");
             };
 
             const exportPdfReport = () => {
                 exportPdfReportFile({
-                    source: userFilteredData,
+                    source: focoEstrategico,
+                    fullData: userFilteredData,
+                    recoveredData: recoveredRecuperoData,
+                    recuperoSummary,
                     currentUser,
                     priorityLabel,
                     getFocoEtiqueta
                 });
             };
 
-            // Pantalla de Selección de Usuario
+            const exportRecuperoReport = () => {
+                exportRecuperoPdfFile({
+                    recuperoData: recoveredRecuperoData,
+                    currentUser
+                });
+            };
+
+            const misCuentas = useMemo(() => {
+                if (currentUserRol !== 'recupero') return [];
+                return recuperoList.filter(r =>
+                    !r.recuperada &&
+                    (r.asesorRecupero === currentUser || recuperoDrafts[r.id]?.asesorRecupero === currentUser)
+                );
+            }, [currentUserRol, currentUser, recuperoList, recuperoDrafts]);
+
+            const sortedMisCuentas = useMemo(() => {
+                return [...misCuentas].sort((a, b) => compareRecuperoAsesorItems(a, b, recuperoScoring));
+            }, [misCuentas, recuperoScoring]);
+
+            const misCuentasValorEnRecupero = useMemo(() => {
+                return misCuentas.reduce((acc, item) => acc + (item.valorOriginal || 0), 0);
+            }, [misCuentas]);
+
+            // ============= 4. UI (renderizado) =============
+
             if (!currentUser && !loading) return (
                 <div className="min-h-screen flex items-center justify-center bg-slate-900 p-6">
-                    <div className="login-card w-full max-w-md bg-white rounded-[3rem] p-10 shadow-2xl text-center">
-                        <div className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-xl">
-                            <i data-lucide="shield-check" className="w-8 h-8 text-blue-400"></i>
+                    <div className="login-card w-full max-w-2xl bg-white rounded-[3rem] p-10 shadow-2xl">
+                        <div className="text-center mb-8">
+                            <div className="w-16 h-16 bg-slate-900 rounded-2xl flex items-center justify-center text-white mx-auto mb-6 shadow-xl">
+                                <i data-lucide="shield-check" className="w-8 h-8 text-blue-400"></i>
+                            </div>
+                            <h2 className="text-2xl font-black text-slate-900 italic tracking-tighter mb-2">Acceso CRM Elite</h2>
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Selecciona tu perfil para continuar</p>
                         </div>
-                        <h2 className="text-2xl font-black text-slate-900 italic tracking-tighter mb-2">Acceso CRM Elite</h2>
-                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-8">Selecciona tu perfil de consultor</p>
-                        
-                        <div className="space-y-3">
-                            {propietariosDisponibles.map(user => (
-                                <button 
-                                    key={user}
-                                    onClick={() => setCurrentUser(user)}
-                                    className={`w-full p-5 rounded-2xl text-xs font-black uppercase tracking-widest transition-all flex items-center justify-between group
-                                        ${user === MASTER_USER ? 'bg-blue-600 text-white shadow-lg shadow-blue-200' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'}`}
-                                >
-                                    <span>{user}</span>
-                                    <i data-lucide="chevron-right" className={`w-4 h-4 transition-transform group-hover:translate-x-1 ${user === MASTER_USER ? 'text-white' : 'text-slate-300'}`}></i>
-                                </button>
-                            ))}
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            {/* Columna izquierda: Consultores de Cartera */}
+                            <div>
+                                <div className="flex items-center gap-2 mb-3">
+                                    <div className="w-6 h-6 bg-blue-600 rounded-lg flex items-center justify-center">
+                                        <i data-lucide="briefcase" className="w-3 h-3 text-white"></i>
+                                    </div>
+                                    <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Consultor de Cartera</p>
+                                </div>
+                                <div className="space-y-2">
+                                    {propietariosDisponibles.map(user => (
+                                        <button
+                                            key={user}
+                                            onClick={() => setCurrentUser(user)}
+                                            className={`w-full p-4 rounded-2xl text-xs font-black uppercase tracking-widest transition-all flex items-center justify-between group
+                                                ${user === MASTER_USER ? 'bg-blue-600 text-white shadow-lg shadow-blue-200' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'}`}
+                                        >
+                                            <span>{user}</span>
+                                            <i data-lucide="chevron-right" className={`w-4 h-4 transition-transform group-hover:translate-x-1 ${user === MASTER_USER ? 'text-white' : 'text-slate-300'}`}></i>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Columna derecha: Asesores de Recupero */}
+                            <div>
+                                <div className="flex items-center gap-2 mb-3">
+                                    <div className="w-6 h-6 bg-amber-500 rounded-lg flex items-center justify-center">
+                                        <i data-lucide="refresh-ccw" className="w-3 h-3 text-white"></i>
+                                    </div>
+                                    <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Asesor de Recupero</p>
+                                </div>
+                                {asesoresRecupero.length === 0 ? (
+                                    <div className="h-24 flex items-center justify-center border-2 border-dashed border-slate-200 rounded-2xl">
+                                        <p className="text-[9px] text-slate-300 font-black uppercase">Sin asesores registrados</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {asesoresRecupero.map(user => (
+                                            <button
+                                                key={user}
+                                                onClick={() => setCurrentUser(user)}
+                                                className="w-full p-4 rounded-2xl text-xs font-black uppercase tracking-widest transition-all flex items-center justify-between group bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200"
+                                            >
+                                                <span>{user}</span>
+                                                <i data-lucide="chevron-right" className="w-4 h-4 text-amber-300 transition-transform group-hover:translate-x-1"></i>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
                         </div>
-                        <p className="mt-8 text-[9px] font-bold text-slate-300 uppercase tracking-widest italic">Retention Intelligence System v2.0</p>
+
+                        <p className="mt-8 text-[9px] font-bold text-slate-300 uppercase tracking-widest italic text-center">Retention Intelligence System v2.0</p>
                     </div>
                 </div>
             );
+
+            if (currentUserRol === 'recupero') {
+                return (
+                    <div className="max-w-[900px] mx-auto p-4 md:p-8">
+                        <header className="flex justify-between items-center mb-8">
+                            <div className="flex items-center gap-4">
+                                <div className="w-12 h-12 bg-amber-500 rounded-2xl flex items-center justify-center shadow-lg">
+                                    <i data-lucide="refresh-ccw" className="w-6 h-6 text-white"></i>
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-extrabold tracking-tighter text-slate-900 italic">Modulo de Recupero</h1>
+                                    <span className="text-[9px] font-black text-amber-600 uppercase tracking-widest">{currentUser}</span>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <button onClick={fetchData} className="p-3 bg-white rounded-2xl shadow-sm hover:text-blue-600 transition-colors">
+                                    <i data-lucide="refresh-cw" className={`w-5 h-5 ${saving ? 'animate-spin' : ''}`}></i>
+                                </button>
+                                <button onClick={exportRecuperoReport} className="p-3 bg-white rounded-2xl shadow-sm hover:text-emerald-600 transition-colors" title="Exportar recuperados">
+                                    <i data-lucide="file-down" className="w-5 h-5"></i>
+                                </button>
+                                <button onClick={() => setCurrentUser(null)} className="text-[8px] font-bold text-slate-400 underline uppercase hover:text-rose-500">Salir</button>
+                            </div>
+                        </header>
+
+                        <div className="grid grid-cols-2 gap-4 mb-8">
+                            <div className="bg-amber-500 p-6 rounded-[2rem] text-white shadow-xl">
+                                <span className="text-[9px] font-black text-amber-100 uppercase tracking-widest block mb-1">Mis Cuentas Asignadas</span>
+                                <p className="text-3xl font-black">{misCuentas.length}</p>
+                            </div>
+                            <div className="bg-slate-900 p-6 rounded-[2rem] text-white shadow-xl">
+                                <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-1">Valor en Recupero</span>
+                                <p className="text-3xl font-black text-amber-400">${misCuentasValorEnRecupero.toLocaleString()}</p>
+                            </div>
+                        </div>
+
+                        {misCuentas.length === 0 ? (
+                            <div className="bg-white rounded-[3rem] p-16 text-center shadow-sm border border-slate-100">
+                                <i data-lucide="inbox" className="w-12 h-12 text-slate-200 mx-auto mb-4"></i>
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">No tienes cuentas asignadas aun</p>
+                                <p className="text-[9px] text-slate-300 mt-2">El Master te asignara cuentas desde la bolsa de recupero.</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-4">
+                                {sortedMisCuentas.map(rec => {
+                                    const merged = recuperoViewMap[rec.id] || rec;
+                                    const draft = merged._draft || {};
+                                    const diferencia = merged._diferencia ?? ((merged.valorOriginal || 0) - (parseFloat(merged.valorRecuperado) || 0));
+                                    const etapaConfig = merged._etapaActual || ETAPAS_RECUPERO_MAP.get(merged.etapaGestion);
+                                    return (
+                                        <div key={rec.id} className="bg-white rounded-[2.5rem] p-6 shadow-sm border border-slate-100">
+                                            <div className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.7fr_1.2fr] gap-4 items-start">
+                                                <div className="min-w-0">
+                                                    <span className={`text-[8px] font-black px-2 py-1 rounded-full uppercase mr-2 ${rec.estadoChurn === 'Pausado' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
+                                                        {rec.estadoChurn}
+                                                    </span>
+                                                    <p className="font-extrabold text-slate-900 mt-2">{rec.nombre}</p>
+                                                    <div className="flex gap-2 mt-1 flex-wrap">
+                                                        <span className="text-[8px] font-black text-blue-600 bg-blue-50 px-2 py-0.5 rounded">ID: {rec.id}</span>
+                                                        <span className="text-[8px] font-black text-slate-400 uppercase">Titular: {rec.propietarioOriginal}</span>
+                                                        <span className="text-[8px] font-black text-slate-400">{rec.definicion}</span>
+                                                    </div>
+                                                </div>
+                                                <div className="xl:text-right">
+                                                    <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Valor Original</p>
+                                                    <p className="text-xl font-black text-slate-700">${(rec.valorOriginal||0).toLocaleString()}</p>
+                                                    <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Valor Recuperado</p>
+                                                    <div className="flex items-center gap-1 border-b-2 border-emerald-300 pb-1">
+                                                        <span className="text-slate-300 font-bold">$</span>
+                                                        <input
+                                                            type="number"
+                                                            className="flex-1 bg-transparent font-black text-sm focus:outline-none text-emerald-700"
+                                                            value={merged._valorRecuperadoInputEmpty ? '' : merged.valorRecuperado}
+                                                            placeholder="0"
+                                                            onChange={e => setRecuperoDrafts(prev => ({
+                                                                ...prev,
+                                                                [rec.id]: { ...(prev[rec.id]||{}), valorRecuperado: e.target.value === '' ? 0 : parseFloat(e.target.value)||0 }
+                                                            }))}
+                                                        />
+                                                        <span className={`text-[9px] font-black ${diferencia > 0 ? 'text-rose-400' : 'text-emerald-500'}`}>
+                                                            {diferencia > 0 ? `-$${Math.abs(diferencia).toLocaleString()}` : `+$${Math.abs(diferencia).toLocaleString()}`}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Etapa de Gestion</p>
+                                                    <div className="grid grid-cols-2 gap-2">
+                                                        {ETAPAS_RECUPERO_EDITABLES.map(et => {
+                                                            const isActive = merged.etapaGestion === et.id;
+                                                            return (
+                                                                <button
+                                                                    key={et.id}
+                                                                    type="button"
+                                                                    onClick={() => setRecuperoDrafts(prev => ({
+                                                                        ...prev,
+                                                                        [rec.id]: { ...(prev[rec.id]||{}), etapaGestion: et.id }
+                                                                    }))}
+                                                                    className={`rounded-xl px-3 py-2 text-[9px] font-black uppercase border transition-all text-left ${
+                                                                        isActive
+                                                                            ? `${et.color} shadow-sm scale-[0.98]`
+                                                                            : 'bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300'
+                                                                    }`}
+                                                                >
+                                                                    {et.label}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+
+                                                    {merged.etapaGestion === 'acuerdo_pago' && (
+                                                        <div className="mt-2">
+                                                            <p className="text-[8px] font-black text-emerald-600 uppercase mb-1">Fecha del Acuerdo</p>
+                                                            <input
+                                                                type="date"
+                                                                className="w-full bg-emerald-50 border-2 border-emerald-200 rounded-xl px-3 py-2 text-[10px] font-black outline-none focus:border-emerald-500 text-emerald-700"
+                                                                value={merged.fechaAcuerdo || ''}
+                                                                onChange={e => setRecuperoDrafts(prev => ({
+                                                                    ...prev,
+                                                                    [rec.id]: { ...(prev[rec.id]||{}), fechaAcuerdo: e.target.value }
+                                                                }))}
+                                                            />
+                                                        </div>
+                                                    )}
+
+                                                    {merged._acuerdoVencido && (
+                                                        <div className="flex items-center gap-2 bg-orange-50 border border-orange-200 rounded-xl px-3 py-2 mt-2">
+                                                            <i data-lucide="alert-triangle" className="w-3 h-3 text-orange-500 shrink-0"></i>
+                                                            <p className="text-[9px] font-black text-orange-600">Acuerdo vencido el {new Date(merged.fechaAcuerdo + 'T00:00:00').toLocaleDateString('es-ES')}</p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-4">
+                                                <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Gestion / Comentarios</p>
+                                                <textarea
+                                                    className="w-full bg-amber-50 border-2 border-amber-200 rounded-xl px-3 py-2 text-[10px] font-medium outline-none focus:border-amber-400 resize-none h-16 placeholder:text-amber-400 placeholder:font-bold"
+                                                    placeholder="Describe la gestion realizada..."
+                                                    value={merged.notaRecupero || ''}
+                                                    onChange={e => setRecuperoDrafts(prev => ({
+                                                        ...prev,
+                                                        [rec.id]: { ...(prev[rec.id]||{}), notaRecupero: e.target.value }
+                                                    }))}
+                                                />
+                                            </div>
+
+                                            <button
+                                                onClick={() => guardarGestionRecupero(rec)}
+                                                className={`mt-2 w-full py-4 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all shadow-lg ${
+                                                    merged.etapaGestion === 'recuperado'         ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-100' :
+                                                    merged.etapaGestion === 'perdido_definitivo' ? 'bg-rose-600 hover:bg-rose-500 shadow-rose-100' :
+                                                    'bg-slate-700 hover:bg-slate-600 shadow-slate-100'
+                                                }`}
+                                            >
+                                                <i data-lucide={merged.etapaGestion === 'perdido_definitivo' ? 'x-circle' : 'check-circle'} className="w-4 h-4"></i>
+                                                {merged.etapaGestion === 'recuperado'         ? 'Marcar como Recuperada' :
+                                                 merged.etapaGestion === 'perdido_definitivo' ? 'Marcar como Perdida' :
+                                                 'Guardar Gestion'}
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+            // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
             if (loading) return (
                 <div className="min-h-screen flex flex-col items-center justify-center bg-white">
@@ -694,6 +1889,30 @@
                         </div>
 
                         <div className="flex flex-col sm:flex-row gap-3 w-full lg:w-auto">
+                            {/* PESTAÃ‘AS */}
+                            <div className="flex bg-white rounded-2xl shadow-sm p-1 gap-1">
+                                <button
+                                    onClick={() => setActiveTab('monitor')}
+                                    className={`px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all ${activeTab === 'monitor' ? 'bg-slate-900 text-white' : 'text-slate-400 hover:text-slate-700'}`}
+                                >
+                                    <span className="flex items-center gap-1.5">
+                                        <i data-lucide="activity" className="w-3 h-3"></i> Monitor
+                                    </span>
+                                </button>
+                                {currentUser === MASTER_USER && (
+                                    <button
+                                        onClick={() => setActiveTab('recupero')}
+                                        className={`px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${activeTab === 'recupero' ? 'bg-amber-500 text-white' : 'text-slate-400 hover:text-amber-600'}`}
+                                    >
+                                        <i data-lucide="refresh-ccw" className="w-3 h-3"></i> Recupero
+                                        {recuperoList.filter(r => !r.recuperada).length > 0 && (
+                                            <span className="bg-rose-500 text-white text-[8px] font-black px-1.5 py-0.5 rounded-full">
+                                                {recuperoList.filter(r => !r.recuperada).length}
+                                            </span>
+                                        )}
+                                    </button>
+                                )}
+                            </div>
                             <div className="relative flex-1 lg:w-80">
                                 <i data-lucide="search" className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300"></i>
                                 <input 
@@ -704,7 +1923,7 @@
                             <button onClick={fetchData} className="p-4 bg-white rounded-2xl shadow-sm hover:text-blue-600 transition-colors">
                                 <i data-lucide="refresh-cw" className={`w-5 h-5 ${saving ? 'animate-spin' : ''}`}></i>
                             </button>
-                            <button onClick={exportPdfReport} className="p-4 bg-white rounded-2xl shadow-sm hover:text-emerald-600 transition-colors" title="Exportar PDF">
+                            <button onClick={activeTab === 'recupero' ? exportRecuperoReport : exportPdfReport} className="p-4 bg-white rounded-2xl shadow-sm hover:text-emerald-600 transition-colors" title={activeTab === 'recupero' ? "Exportar recuperados" : "Exportar monitor"}>
                                 <i data-lucide="file-down" className="w-5 h-5"></i>
                             </button>
                         </div>
@@ -712,13 +1931,30 @@
 
                     {currentUser === MASTER_USER && showRulesPanel && (
                         <div className="mb-6 bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
-                            <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2">Regla automática de Prioridad</p>
+                            <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2">Reglas de Scoring de Prioridad</p>
                             <div className="flex flex-col sm:flex-row gap-2">
                                 <input
                                     className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-slate-400"
-                                    placeholder="Ej: flujo comercial, stock"
+                                    placeholder="Ej: flujo comercial:45, stock:35"
                                     value={autoRulesInput}
-                                    onChange={e => setAutoRulesInput(e.target.value)}
+                                    onChange={e => {
+                                        const nextValue = e.target.value;
+                                        setAutoRulesInput(nextValue);
+                                        const parsedRules = String(nextValue)
+                                            .split(",")
+                                            .map(part => part.trim())
+                                            .filter(Boolean)
+                                            .map((entry, idx) => {
+                                                const [keywordRaw, pointsRaw] = entry.split(":");
+                                                return {
+                                                    id: `rule-quick-${idx}`,
+                                                    keyword: String(keywordRaw || "").toLowerCase().trim(),
+                                                    points: parseInt(pointsRaw, 10) || 0
+                                                };
+                                            })
+                                            .filter(rule => rule.keyword.length > 0);
+                                        setScoringConfig(prev => ({ ...prev, keywordRules: ensureMinKeywordRules(parsedRules) }));
+                                    }}
                                 />
                                 <input
                                     className="sm:w-40 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-slate-400"
@@ -734,51 +1970,253 @@
                                     title="Color etiqueta prioridad"
                                 />
                                 <button
-                                    onClick={saveAutoPriorityRules}
+                                    onClick={saveScoringRules}
                                     className="px-4 py-2 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
                                 >
                                     Guardar Reglas
                                 </button>
                             </div>
+                            <div className="mt-3 border border-slate-100 rounded-xl overflow-hidden">
+                                <div className="grid grid-cols-12 bg-slate-50 text-[9px] font-black uppercase tracking-wider text-slate-500 px-3 py-2">
+                                    <span className="col-span-8">Definicion contiene</span>
+                                    <span className="col-span-3 text-center">Puntos</span>
+                                    <span className="col-span-1 text-center">X</span>
+                                </div>
+                                <div className="p-2 space-y-2">
+                                    {scoringConfig.keywordRules.map(rule => (
+                                        <div key={rule.id} className="grid grid-cols-12 gap-2 items-center">
+                                            <input
+                                                className="col-span-8 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-[11px] outline-none focus:border-slate-400"
+                                                value={rule.keyword}
+                                                onChange={e => updateKeywordRule(rule.id, { keyword: e.target.value.toLowerCase() })}
+                                                placeholder="ej: flujo comercial"
+                                            />
+                                            <input
+                                                type="number"
+                                                className="col-span-3 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-[11px] text-center outline-none focus:border-slate-400"
+                                                value={rule.points}
+                                                onChange={e => updateKeywordRule(rule.id, { points: parseInt(e.target.value, 10) || 0 })}
+                                            />
+                                            <button
+                                                onClick={() => removeKeywordRule(rule.id)}
+                                                disabled={scoringConfig.keywordRules.length <= MIN_KEYWORD_RULES}
+                                                className={`col-span-1 h-8 rounded-lg text-[10px] font-black ${scoringConfig.keywordRules.length <= MIN_KEYWORD_RULES ? "bg-slate-100 text-slate-400 cursor-not-allowed" : "bg-rose-50 text-rose-600"}`}
+                                                title={scoringConfig.keywordRules.length <= MIN_KEYWORD_RULES ? `Minimo ${MIN_KEYWORD_RULES} reglas` : "Eliminar regla"}
+                                            >
+                                                -
+                                            </button>
+                                        </div>
+                                    ))}
+                                    <button
+                                        onClick={addKeywordRule}
+                                        className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[10px] font-black uppercase tracking-widest"
+                                    >
+                                        Agregar regla
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                                <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-500 mb-1">Puntos Manual</p>
+                                    <input
+                                        type="number"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-[11px] outline-none focus:border-slate-400"
+                                        value={scoringConfig.points.manual}
+                                        onChange={e => setScoringConfig(prev => ({ ...prev, points: { ...prev.points, manual: parseInt(e.target.value, 10) || 0 } }))}
+                                    />
+                                </div>
+                                <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-500 mb-1">Puntos Recurrencia 0</p>
+                                    <input
+                                        type="number"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-[11px] outline-none focus:border-slate-400"
+                                        value={scoringConfig.points.recurrenciaCero}
+                                        onChange={e => setScoringConfig(prev => ({ ...prev, points: { ...prev.points, recurrenciaCero: parseInt(e.target.value, 10) || 0 } }))}
+                                    />
+                                </div>
+                                <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-500 mb-1">Puntos Recurrencia Baja</p>
+                                    <input
+                                        type="number"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-[11px] outline-none focus:border-slate-400"
+                                        value={scoringConfig.points.recurrenciaBaja}
+                                        onChange={e => setScoringConfig(prev => ({ ...prev, points: { ...prev.points, recurrenciaBaja: parseInt(e.target.value, 10) || 0 } }))}
+                                    />
+                                </div>
+                                <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-500 mb-1">Puntos Pausa S/R</p>
+                                    <input
+                                        type="number"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-[11px] outline-none focus:border-slate-400"
+                                        value={scoringConfig.points.pausaSinRecurrencia}
+                                        onChange={e => setScoringConfig(prev => ({ ...prev, points: { ...prev.points, pausaSinRecurrencia: parseInt(e.target.value, 10) || 0 } }))}
+                                    />
+                                </div>
+                                <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-500 mb-1">Umbral Prioridad</p>
+                                    <input
+                                        type="number"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-[11px] outline-none focus:border-slate-400"
+                                        value={scoringConfig.thresholds.prioridad}
+                                        onChange={e => setScoringConfig(prev => ({ ...prev, thresholds: { ...prev.thresholds, prioridad: parseInt(e.target.value, 10) || 0 } }))}
+                                    />
+                                </div>
+                                <div>
+                                    <p className="text-[9px] font-black uppercase tracking-wider text-slate-500 mb-1">Umbral Critico</p>
+                                    <input
+                                        type="number"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-[11px] outline-none focus:border-slate-400"
+                                        value={scoringConfig.thresholds.critico}
+                                        onChange={e => setScoringConfig(prev => ({ ...prev, thresholds: { ...prev.thresholds, critico: parseInt(e.target.value, 10) || 0 } }))}
+                                    />
+                                </div>
+                            </div>
                             <div className="flex flex-col sm:flex-row gap-2 mt-2">
                                 <button
-                                    onClick={applyAutomaticPriorities}
-                                    className="px-4 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                                >
-                                    Prioridades Automáticas
-                                </button>
-                                <button
-                                    onClick={clearAutoPriorityRules}
+                                    onClick={clearScoringRules}
                                     className="px-4 py-2 bg-rose-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
                                 >
                                     Borrar Reglas
                                 </button>
                             </div>
+
+                            {/* â”€â”€ Asesores de Recupero â”€â”€ */}
+                            <div className="mt-5 border-t border-slate-100 pt-4">
+                                <p className="text-[9px] font-black text-amber-600 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                    <i data-lucide="refresh-ccw" className="w-3 h-3"></i> Asesores de Recupero
+                                </p>
+                                <div className="flex gap-2 mb-3">
+                                    <input
+                                        className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[11px] outline-none focus:border-amber-400"
+                                        placeholder="Nombre del asesor de recupero..."
+                                        value={nuevoAsesorRecupero}
+                                        onChange={e => setNuevoAsesorRecupero(e.target.value)}
+                                        onKeyDown={e => {
+                                            if (e.key === 'Enter') {
+                                                const nombre = nuevoAsesorRecupero.trim();
+                                                if (!nombre) return;
+                                                if (asesoresRecupero.includes(nombre)) { alert('Ese asesor ya existe.'); return; }
+                                                const next = [...asesoresRecupero, nombre];
+                                                setAsesoresRecupero(next);
+                                                writeJSONStorage('crm_asesores_recupero', next);
+                                                setNuevoAsesorRecupero('');
+                                            }
+                                        }}
+                                    />
+                                    <button
+                                        onClick={() => {
+                                            const nombre = nuevoAsesorRecupero.trim();
+                                            if (!nombre) return;
+                                            if (asesoresRecupero.includes(nombre)) { alert('Ese asesor ya existe.'); return; }
+                                            const next = [...asesoresRecupero, nombre];
+                                            setAsesoresRecupero(next);
+                                            writeJSONStorage('crm_asesores_recupero', next);
+                                            setNuevoAsesorRecupero('');
+                                        }}
+                                        className="px-4 py-2 bg-amber-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
+                                    >
+                                        Agregar
+                                    </button>
+                                </div>
+                                {asesoresRecupero.length === 0 ? (
+                                    <p className="text-[9px] text-slate-300 italic">Sin asesores de recupero registrados.</p>
+                                ) : (
+                                    <div className="flex flex-wrap gap-2">
+                                        {asesoresRecupero.map(a => (
+                                            <span key={a} className="flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-black px-3 py-1.5 rounded-xl">
+                                                {a}
+                                                <button
+                                                    onClick={() => {
+                                                        const next = asesoresRecupero.filter(x => x !== a);
+                                                        setAsesoresRecupero(next);
+                                                        writeJSONStorage('crm_asesores_recupero', next);
+                                                    }}
+                                                    className="text-amber-400 hover:text-rose-500 font-black text-xs leading-none"
+                                                >âœ•</button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* â”€â”€ Scoring por Etapa de Recupero â”€â”€ */}
+                            <div className="mt-5 border-t border-slate-100 pt-4">
+                                <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                    <i data-lucide="bar-chart-2" className="w-3 h-3"></i> Scoring por Etapa de Recupero
+                                </p>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                    {ETAPAS_RECUPERO.map(et => (
+                                        <div key={et.id}>
+                                            <p className={`text-[8px] font-black uppercase px-2 py-0.5 rounded-full border mb-1 inline-block ${et.color}`}>{et.label}</p>
+                                            <div className="flex items-center gap-1">
+                                                <input
+                                                    type="number"
+                                                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 text-[11px] outline-none focus:border-slate-400 text-center font-black"
+                                                    value={recuperoScoring[et.id] ?? 0}
+                                                    onChange={e => setRecuperoScoring(prev => ({ ...prev, [et.id]: parseInt(e.target.value,10)||0 }))}
+                                                />
+                                                <span className="text-[9px] text-slate-400 font-bold">pts</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        writeJSONStorage(STORAGE_KEYS.recuperoScoring, recuperoScoring);
+                                        alert('Scoring de recupero guardado.');
+                                    }}
+                                    className="mt-3 px-4 py-2 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
+                                >
+                                    Guardar Scoring Recupero
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    {fetchError && (
+                        <div className="mb-6 bg-rose-50 border border-rose-200 rounded-2xl p-5 flex items-start gap-4">
+                            <i data-lucide="alert-circle" className="w-5 h-5 text-rose-500 shrink-0 mt-0.5"></i>
+                            <div className="flex-1 min-w-0">
+                                <p className="text-[10px] font-black text-rose-700 uppercase tracking-widest mb-1">Error al cargar datos desde Google Sheets</p>
+                                <p className="text-[10px] text-rose-600 break-all">{fetchError}</p>
+                                <p className="text-[9px] text-rose-400 mt-2">Verifica: (1) URL del script correcta, (2) script desplegado como "Cualquier persona", (3) abre la URL directamente en el navegador para ver la respuesta.</p>
+                            </div>
+                            <button onClick={fetchData} className="shrink-0 px-3 py-2 bg-rose-600 text-white rounded-xl text-[9px] font-black uppercase">Reintentar</button>
                         </div>
                     )}
 
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 md:gap-6 mb-8">
-                        <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
+                    {/* ===== VISTA MONITOR (tab normal) ===== */}
+                    {activeTab === 'monitor' && (<>
+                    <div className={`grid grid-cols-1 ${currentUser === MASTER_USER ? 'md:grid-cols-5' : 'md:grid-cols-4'} gap-4 md:gap-6 mb-8`}>
+                        <div className="bg-white p-6 sm:p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
                             <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-2">Mis Carteras</span>
-                            <p className="text-3xl font-black text-slate-900">{userFilteredData.length}</p>
+                            <p className="text-[clamp(1.75rem,5vw,2.25rem)] leading-none font-black text-slate-900">{userFilteredData.length}</p>
                         </div>
-                        <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
+                        <div className="bg-white p-6 sm:p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
                             <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-2">Avance Global</span>
-                            <p className="text-3xl font-black text-slate-900">{metrics.avance.toFixed(1)}%</p>
+                            <p className="text-[clamp(1.75rem,5vw,2.25rem)] leading-none font-black text-slate-900">{metrics.avance.toFixed(1)}%</p>
                             <div className="w-full bg-slate-100 h-1.5 rounded-full mt-3 overflow-hidden">
                                 <div className="h-full bg-slate-900" style={{width: `${metrics.avance}%`}}></div>
                             </div>
                         </div>
-                        <div className="bg-rose-600 p-8 rounded-[2.5rem] shadow-xl shadow-rose-100 text-white relative overflow-hidden">
-                            <span className="text-[9px] font-black text-rose-100 uppercase tracking-widest">Riesgos Críticos</span>
-                            <p className="text-3xl font-black mt-2">{metrics.criticos}</p>
+                        <div className="bg-rose-600 p-6 sm:p-8 rounded-[2.5rem] shadow-xl shadow-rose-100 text-white relative overflow-hidden">
+                            <span className="text-[9px] font-black text-rose-100 uppercase tracking-widest">Riesgos CrÃ­ticos</span>
+                            <p className="text-[clamp(1.75rem,5vw,2.25rem)] leading-none font-black mt-2">{metrics.criticos}</p>
                             <i data-lucide="alert-triangle" className="absolute -right-2 -bottom-2 w-16 h-16 text-white/10"></i>
                         </div>
-                        <div className="bg-slate-900 p-8 rounded-[2.5rem] shadow-xl text-white">
+                        <div className="bg-slate-900 p-6 sm:p-8 rounded-[2.5rem] shadow-xl text-white">
                             <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-2">Recurrencia Mi Canal</span>
-                            <p className="text-3xl font-black text-emerald-400">${metrics.real.toLocaleString()}</p>
-                            <p className="text-[8px] font-bold text-slate-500 mt-1 uppercase italic">Meta: ${metrics.target.toLocaleString()}</p>
+                            <p className="text-[clamp(1.15rem,4vw,1rem)] leading-none font-black text-emerald-400 break-all">${metrics.real.toLocaleString()}</p>
+                            <p className="text-[9px] sm:text-[10px] font-bold text-slate-500 mt-2 uppercase italic break-all">Meta: ${metrics.target.toLocaleString()}</p>
                         </div>
+                        {currentUser === MASTER_USER && (
+                            <div className="bg-blue-600 p-6 sm:p-8 rounded-[2.5rem] shadow-xl shadow-blue-100 text-white">
+                                <span className="text-[9px] font-black text-blue-100 uppercase tracking-widest block mb-2">Resumen Recupero</span>
+                                <p className="text-[clamp(1.2rem,4.2vw,1.65rem)] leading-tight font-black break-words">{recuperoSummary.totalIngresadas} ingresadas</p>
+                                <p className="text-[9px] font-bold text-blue-100 mt-2 uppercase">Recuperadas: {recuperoSummary.recuperadas}</p>
+                                <p className="text-[9px] font-bold text-blue-100 uppercase">Perdidas: {recuperoSummary.perdidas}</p>
+                                <p className="text-[9px] font-bold text-blue-100 uppercase">Pendientes: {recuperoSummary.pendientes}</p>
+                            </div>
+                        )}
                     </div>
 
                     <div className="flex flex-col xl:flex-row gap-8">
@@ -786,7 +2224,7 @@
                             <div className="bg-slate-900 rounded-[3rem] p-8 text-white shadow-2xl xl:sticky xl:top-8 border border-white/5">
                                 <div className="flex justify-between items-center mb-6">
                                     <h3 className="text-xs font-black tracking-widest flex items-center gap-3 text-blue-400 uppercase italic">
-                                        <i data-lucide="zap" className="w-4 h-4"></i> Foco Estratégico
+                                        <i data-lucide="zap" className="w-4 h-4"></i> Foco EstratÃ©gico
                                     </h3>
                                     <div className="flex items-center gap-2">
                                         <button
@@ -839,7 +2277,7 @@
                                                     className="bg-black/40 border border-white/10 rounded-xl p-2 text-[10px] text-white outline-none"
                                                     placeholder="Recurrencia"
                                                     value={newFocoItem.recurrencia}
-                                                    onChange={e => setNewFocoItem(prev => ({ ...prev, recurrencia: parseFloat(e.target.value) || 0 }))}
+                                                    onChange={e => setNewFocoItem(prev => ({ ...prev, recurrencia: e.target.value }))}
                                                 />
                                             </div>
                                             <select
@@ -937,7 +2375,7 @@
 
                                                 <textarea 
                                                     className="w-full bg-black/40 border border-white/10 rounded-2xl p-3 text-[10px] text-slate-300 outline-none h-16 resize-none placeholder:text-slate-700 font-medium"
-                                                    placeholder="Notas de gestión..."
+                                                    placeholder="Notas de gestiÃ³n..."
                                                     value={focoItem.actividad || ""}
                                                     onChange={e => setFocoDrafts(prev => ({
                                                         ...prev,
@@ -974,111 +2412,283 @@
 
                         <div className="w-full xl:w-2/3 order-2 xl:order-1 bg-white rounded-[3rem] shadow-sm border border-slate-100 overflow-hidden">
                             <div className="p-8 border-b border-slate-50 flex flex-col md:flex-row justify-between items-center bg-slate-50/30 gap-4">
-                                <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Monitor de Auditoría</h2>
-                                <div className="flex gap-2 w-full md:w-auto">
-                                    <select 
-                                        className="bg-white px-4 py-2 rounded-xl text-[9px] font-black uppercase border border-slate-100 outline-none cursor-pointer shadow-sm flex-1"
-                                        value={filterEstado} onChange={e => setFilterEstado(e.target.value)}
-                                    >
-                                        <option value="Todos">Ver Todos</option>
-                                        <option value="Vivo">Solo Vivos</option>
-                                        <option value="Pausa">En Pausa</option>
-                                        <option value="Cerrado">Cerrados</option>
-                                    </select>
-                                    <select
-                                        className="bg-white px-4 py-2 rounded-xl text-[9px] font-black uppercase border border-slate-100 outline-none cursor-pointer shadow-sm flex-1"
-                                        value={filterDefinicion}
-                                        onChange={e => setFilterDefinicion(e.target.value)}
-                                    >
-                                        {definicionesDisponibles.map(def => (
-                                            <option key={def} value={def}>
-                                                {def === "Todos" ? "Definicion: Todas" : def}
-                                            </option>
-                                        ))}
-                                    </select>
-                                </div>
+                                <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Monitor de AuditorÃ­a</h2>
+                                <MonitorFiltersBar
+                                    filterEstado={filterEstado}
+                                    setFilterEstado={setFilterEstado}
+                                    filterDefinicion={filterDefinicion}
+                                    setFilterDefinicion={setFilterDefinicion}
+                                    definicionesDisponibles={definicionesDisponibles}
+                                    filterOrigen={filterOrigen}
+                                    setFilterOrigen={setFilterOrigen}
+                                    filterSla={filterSla}
+                                    setFilterSla={setFilterSla}
+                                />
                             </div>
                             
-                            <div className="overflow-x-auto table-container">
-                                <table className="w-full text-left border-collapse">
-                                    <thead>
-                                        <tr className="bg-slate-50/50">
-                                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase w-16 text-center">Prio</th>
-                                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase">Cliente</th>
-                                            {currentUser === MASTER_USER && <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-center">Consultor</th>}
-                                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-center">Definicion</th>
-                                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-right">Recurrencia</th>
-                                            <th className="p-6 text-[9px] font-black text-slate-400 uppercase text-center w-32">Estado</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-50 text-xs">
-                                        {finalData.map(item => {
-                                            const priorityType = isPriority(item);
-                                            const nivel = getNivel(item);
-                                            return (
-                                                <tr key={item.id} className={`hover:bg-slate-50/50 transition-all ${nivel === 'Critico' ? 'row-critical' : nivel === 'Alerta' ? 'row-alert' : ''}`}>
-                                                    <td className="p-6 text-center">
-                                                        <button 
-                                                            onClick={() => updateItem({...item, prioridad: !item.prioridad})}
-                                                            className="transition-transform active:scale-90"
-                                                        >
-                                                            <i data-lucide="star" className={`w-6 h-6 ${priorityType === 'manual' ? 'star-manual' : priorityType === 'auto' ? 'star-auto' : 'star-empty'}`}></i>
-                                                        </button>
-                                                    </td>
-                                                    <td className="p-6">
-                                                        <p className="font-extrabold text-slate-900 text-[11px] leading-tight mb-1">{item.nombre}</p>
-                                                        <span className="text-[8px] font-black text-blue-600 uppercase tracking-widest bg-blue-50 px-2 py-0.5 rounded">ID: {item.id}</span>
-                                                    </td>
-                                                    {currentUser === MASTER_USER && (
-                                                        <td className="p-6 text-center">
-                                                            <span className="text-[8px] font-black text-slate-400 uppercase">{item.propietario}</span>
-                                                        </td>
-                                                    )}
-                                                    <td className="p-6 text-center">
-                                                        <span className="text-[8px] font-black text-slate-500 uppercase">
-                                                            {item.definicion || "#N/D"}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-6 text-right">
-                                                        <div className="flex flex-col items-end">
-                                                            <div className="flex items-center gap-1">
-                                                                <span className="text-slate-300 font-bold">$</span>
-                                                                <input 
-                                                                    type="number" 
-                                                                    className="w-24 bg-transparent border-b border-slate-100 text-right font-black text-xs p-1 focus:border-slate-900 outline-none"
-                                                                    value={item.recurrencia}
-                                                                    onBlur={e => updateItem({...item, recurrencia: parseFloat(e.target.value) || 0})}
-                                                                    onChange={e => {
-                                                                        const val = parseFloat(e.target.value) || 0;
-                                                                        setData(prev => prev.map(d => d.id === item.id ? {...d, recurrencia: val} : d));
-                                                                    }}
-                                                                />
-                                                            </div>
-                                                            <span className="text-[8px] text-slate-400 font-bold mt-1 uppercase italic">Meta: ${item.valorMensual}</span>
-                                                        </div>
-                                                    </td>
-                                                    <td className="p-6">
-                                                        <button 
-                                                            onClick={() => {
-                                                                const next = item.cuentaViva === 1 ? 2 : item.cuentaViva === 2 ? 0 : 1;
-                                                                updateItem({...item, cuentaViva: next});
-                                                            }}
-                                                            className={`w-full py-2 rounded-xl text-[8px] font-black uppercase tracking-widest border transition-all
-                                                                ${item.cuentaViva === 1 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 
-                                                                  item.cuentaViva === 2 ? 'bg-amber-50 text-amber-600 border-amber-100' : 
-                                                                  'bg-slate-50 text-slate-400 border-slate-200'}`}
-                                                        >
-                                                            {getEstadoTexto(item.cuentaViva)}
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
+                            <MonitorTable
+                                monitorFilteredData={monitorFilteredData}
+                                currentUser={currentUser}
+                                isPriority={isPriority}
+                                getNivel={getNivel}
+                                getSlaBucket={getSlaBucket}
+                                updateItem={updateItem}
+                                setData={setData}
+                                getEstadoTexto={getEstadoTexto}
+                            />
                         </div>
                     </div>
+                    </>)}
+
+                    {/* ===== VISTA BOLSA DE RECUPERO (solo Master) ===== */}
+                    {activeTab === 'recupero' && currentUser === MASTER_USER && (
+                        <div>
+                            {/* Metricas de recupero */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                                <div className="bg-amber-500 p-6 sm:p-8 rounded-[2.5rem] shadow-xl text-white">
+                                    <span className="text-[9px] font-black text-amber-100 uppercase tracking-widest block mb-2">En Bolsa de Recupero</span>
+                                    <p className="text-[clamp(1.75rem,5vw,2.25rem)] leading-none font-black">{recuperoStats.pendientes}</p>
+                                </div>
+                                <div className="bg-emerald-600 p-6 sm:p-8 rounded-[2.5rem] shadow-xl text-white">
+                                    <span className="text-[9px] font-black text-emerald-100 uppercase tracking-widest block mb-2">Recuperadas</span>
+                                    <p className="text-[clamp(1.75rem,5vw,2.25rem)] leading-none font-black">{recuperoStats.recuperadas}</p>
+                                </div>
+                                <div className="bg-slate-900 p-6 sm:p-8 rounded-[2.5rem] shadow-xl text-white">
+                                    <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-2">Valor en Riesgo</span>
+                                    <p className="text-[clamp(1.5rem,5vw,2.25rem)] leading-none font-black text-amber-400 break-all">
+                                        ${recuperoStats.valorEnRiesgo.toLocaleString()}
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+                                <div className="bg-white p-5 rounded-[2rem] shadow-sm border border-slate-100">
+                                    <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-2">Ingresadas</span>
+                                    <p className="text-2xl font-black text-slate-900">{recuperoSummary.totalIngresadas}</p>
+                                </div>
+                                <div className="bg-emerald-50 p-5 rounded-[2rem] shadow-sm border border-emerald-100">
+                                    <span className="text-[9px] font-black text-emerald-600 uppercase tracking-widest block mb-2">Recuperadas</span>
+                                    <p className="text-2xl font-black text-emerald-700">{recuperoSummary.recuperadas}</p>
+                                </div>
+                                <div className="bg-rose-50 p-5 rounded-[2rem] shadow-sm border border-rose-100">
+                                    <span className="text-[9px] font-black text-rose-600 uppercase tracking-widest block mb-2">Perdidas</span>
+                                    <p className="text-2xl font-black text-rose-700">{recuperoSummary.perdidas}</p>
+                                </div>
+                                <div className="bg-blue-50 p-5 rounded-[2rem] shadow-sm border border-blue-100">
+                                    <span className="text-[9px] font-black text-blue-600 uppercase tracking-widest block mb-2">Tasa Recuperacion</span>
+                                    <p className="text-2xl font-black text-blue-700">{recuperoSummary.tasaRecuperacion.toFixed(1)}%</p>
+                                </div>
+                            </div>
+
+                            {/* Lista de cuentas en recupero */}
+                            <div className="bg-white rounded-[3rem] shadow-sm border border-slate-100 overflow-hidden">
+                                <div className="p-8 border-b border-slate-50 bg-slate-50/30">
+                                    <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Bolsa de Recupero - Cuentas Pausadas / Cerradas</h2>
+                                    <p className="text-[9px] text-slate-400 mt-1">Asigna un asesor de recupero, edita el valor recuperado y marca cuando se reactive la cuenta.</p>
+                                </div>
+
+                                {recuperoList.length === 0 ? (
+                                    <div className="py-24 text-center">
+                                        <i data-lucide="inbox" className="w-12 h-12 text-slate-200 mx-auto mb-4"></i>
+                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bolsa vacia - no hay cuentas en recupero</p>
+                                        <p className="text-[9px] text-slate-300 mt-2">Cuando una cuenta pase a Pausada o Cerrada, aparecera aqui automaticamente.</p>
+                                    </div>
+                                ) : (
+                                    <div className="divide-y divide-slate-50">
+                                        {sortedRecuperoList.map(rec => {
+                                            const merged = recuperoViewMap[rec.id] || rec;
+                                            const draft = merged._draft || {};
+                                            const valorRec = merged._valorRec ?? (parseFloat(merged.valorRecuperado) || 0);
+                                            const diferencia = merged._diferencia ?? ((merged.valorOriginal || 0) - valorRec);
+                                            const etapaActual = merged._etapaActual || ETAPAS_RECUPERO_MAP.get(merged.etapaGestion);
+                                            const esFinal = merged._esFinal ?? (merged.etapaGestion === 'recuperado' || merged.etapaGestion === 'perdido_definitivo');
+                                            return (
+                                                <div key={rec.id} className={`p-6 md:p-8 transition-all ${rec.recuperada ? 'opacity-40 bg-slate-50/50' : ''}`}>
+                                                    <div className="grid grid-cols-1 xl:grid-cols-[1fr_0.8fr_1.2fr] gap-6 items-start">
+
+                                                        {/* Info cuenta */}
+                                                        <div className="min-w-0">
+                                                            <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                                                <span className={`text-[8px] font-black px-2 py-1 rounded-full uppercase ${rec.estadoChurn === 'Pausado' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
+                                                                    {rec.estadoChurn}
+                                                                </span>
+                                                                {etapaActual && (
+                                                                    <span className={`text-[8px] font-black px-2 py-1 rounded-full uppercase border ${etapaActual.color}`}>
+                                                                        <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${etapaActual.dot}`}></span>
+                                                                        {etapaActual.label}
+                                                                    </span>
+                                                                )}
+                                                                {rec.recuperada && <span className="text-[8px] font-black px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 uppercase border border-emerald-200">Cerrada</span>}
+                                                                <span className="text-[8px] font-black text-slate-400 uppercase">{rec.fechaIngreso ? new Date(rec.fechaIngreso).toLocaleDateString('es-ES') : ''}</span>
+                                                            </div>
+                                                            <p className="font-extrabold text-slate-900 text-sm leading-tight">{rec.nombre}</p>
+                                                            <div className="flex gap-3 mt-1 flex-wrap">
+                                                                <span className="text-[8px] font-black text-blue-600 bg-blue-50 px-2 py-0.5 rounded">ID: {rec.id}</span>
+                                                                <span className="text-[8px] font-black text-slate-500 uppercase">Asesor A: {rec.propietarioOriginal}</span>
+                                                                <span className="text-[8px] font-black text-slate-400">{rec.definicion}</span>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Valores */}
+                                                        <div className="space-y-3">
+                                                            <div>
+                                                                <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Valor Original</p>
+                                                                <p className="text-lg font-black text-slate-700">${(rec.valorOriginal||0).toLocaleString()}</p>
+                                                            </div>
+                                                            <div>
+                                                                <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Valor Recuperado</p>
+                                                                {rec.recuperada ? (
+                                                                    <p className="text-lg font-black text-emerald-600">${valorRec.toLocaleString()}</p>
+                                                                ) : (
+                                                                    <div className="flex items-center gap-1 border-b-2 border-emerald-300">
+                                                                        <span className="text-slate-400 font-bold text-sm">$</span>
+                                                                        <input
+                                                                            type="number"
+                                                                            className="w-24 bg-transparent text-center font-black text-sm p-1 focus:outline-none text-emerald-700"
+                                                                            value={merged._valorRecuperadoInputEmpty ? '' : merged.valorRecuperado}
+                                                                            placeholder="0"
+                                                                            onChange={e => setRecuperoDrafts(prev => ({
+                                                                                ...prev,
+                                                                                [rec.id]: { ...(prev[rec.id]||{}), valorRecuperado: e.target.value === '' ? 0 : parseFloat(e.target.value)||0 }
+                                                                            }))}
+                                                                        />
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                            <div>
+                                                                <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Diferencia</p>
+                                                                <p className={`text-sm font-black ${diferencia > 0 ? 'text-rose-500' : 'text-emerald-600'}`}>
+                                                                    {diferencia > 0 ? '-' : '+'}${Math.abs(diferencia).toLocaleString()}
+                                                                </p>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Gestion */}
+                                                        {!rec.recuperada && (
+                                                            <div className="flex flex-col gap-3 min-w-0">
+                                                                {/* Selector asesor */}
+                                                                <select
+                                                                    className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[10px] font-black outline-none focus:border-amber-400"
+                                                                    value={merged.asesorRecupero || ''}
+                                                                    onChange={e => setRecuperoDrafts(prev => ({
+                                                                        ...prev,
+                                                                        [rec.id]: { ...(prev[rec.id]||{}), asesorRecupero: e.target.value }
+                                                                    }))}
+                                                                >
+                                                                    <option value="">- Asignar Asesor -</option>
+                                                                    {asesoresRecupero.length === 0
+                                                                        ? <option disabled>Sin asesores (agregar en Reglas)</option>
+                                                                        : asesoresRecupero.map(u => <option key={u} value={u}>{u}</option>)
+                                                                    }
+                                                                </select>
+
+                                                                {/* Selector etapa */}
+                                                                <div className="grid grid-cols-2 gap-2">
+                                                                    {ETAPAS_RECUPERO_EDITABLES.map(et => {
+                                                                        const isActive = merged.etapaGestion === et.id;
+                                                                        return (
+                                                                            <button
+                                                                                key={et.id}
+                                                                                type="button"
+                                                                                onClick={() => setRecuperoDrafts(prev => ({
+                                                                                    ...prev,
+                                                                                    [rec.id]: { ...(prev[rec.id]||{}), etapaGestion: et.id }
+                                                                                }))}
+                                                                                className={`rounded-xl px-3 py-2 text-[9px] font-black uppercase border transition-all text-left ${
+                                                                                    isActive
+                                                                                        ? `${et.color} shadow-sm scale-[0.98]`
+                                                                                        : 'bg-slate-50 border-slate-200 text-slate-500 hover:border-slate-300'
+                                                                                }`}
+                                                                            >
+                                                                                {et.label}
+                                                                            </button>
+                                                                        );
+                                                                    })}
+                                                                </div>
+
+                                                                {/* Campo fecha si es acuerdo de pago */}
+                                                                {merged.etapaGestion === 'acuerdo_pago' && (
+                                                                    <div>
+                                                                        <p className="text-[8px] font-black text-emerald-600 uppercase mb-1">Fecha del Acuerdo</p>
+                                                                        <input
+                                                                            type="date"
+                                                                            className="w-full bg-emerald-50 border-2 border-emerald-200 rounded-xl px-3 py-2 text-[10px] font-black outline-none focus:border-emerald-500 text-emerald-700"
+                                                                            value={merged.fechaAcuerdo || ''}
+                                                                            onChange={e => setRecuperoDrafts(prev => ({
+                                                                                ...prev,
+                                                                                [rec.id]: { ...(prev[rec.id]||{}), fechaAcuerdo: e.target.value }
+                                                                            }))}
+                                                                        />
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Alerta acuerdo vencido */}
+                                                                {merged._acuerdoVencido && (
+                                                                    <div className="flex items-center gap-2 bg-orange-50 border border-orange-200 rounded-xl px-3 py-2">
+                                                                        <i data-lucide="alert-triangle" className="w-3 h-3 text-orange-500 shrink-0"></i>
+                                                                        <p className="text-[9px] font-black text-orange-600">Acuerdo vencido el {new Date(merged.fechaAcuerdo + 'T00:00:00').toLocaleDateString('es-ES')}</p>
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Textarea gestion destacada */}
+                                                                <div className="relative">
+                                                                    <textarea
+                                                                        className="w-full bg-amber-50 border-2 border-amber-200 rounded-xl px-3 py-2 text-[10px] font-medium outline-none focus:border-amber-400 resize-none h-16 placeholder:text-amber-400 placeholder:font-bold"
+                                                                        placeholder="Escribe la gestion realizada..."
+                                                                        value={merged.notaRecupero || ''}
+                                                                        onChange={e => setRecuperoDrafts(prev => ({
+                                                                            ...prev,
+                                                                            [rec.id]: { ...(prev[rec.id]||{}), notaRecupero: e.target.value }
+                                                                        }))}
+                                                                    />
+                                                                </div>
+
+                                                                {/* Boton dinamico segun etapa */}
+                                                                <button
+                                                                    onClick={() => guardarGestionRecupero(rec)}
+                                                                    className={`py-3 text-white rounded-xl text-[9px] font-black uppercase tracking-widest flex items-center justify-center gap-2 transition-all shadow-lg ${
+                                                                        merged.etapaGestion === 'recuperado'         ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-100' :
+                                                                        merged.etapaGestion === 'perdido_definitivo' ? 'bg-rose-600 hover:bg-rose-500 shadow-rose-100' :
+                                                                        merged.etapaGestion === 'acuerdo_pago'       ? 'bg-teal-600 hover:bg-teal-500 shadow-teal-100' :
+                                                                        'bg-slate-700 hover:bg-slate-600 shadow-slate-100'
+                                                                    }`}
+                                                                >
+                                                                    <i data-lucide={
+                                                                        merged.etapaGestion === 'recuperado'         ? 'check-circle' :
+                                                                        merged.etapaGestion === 'perdido_definitivo' ? 'x-circle' :
+                                                                        merged.etapaGestion === 'acuerdo_pago'       ? 'handshake' :
+                                                                        'save'
+                                                                    } className="w-4 h-4"></i>
+                                                                    {merged.etapaGestion === 'recuperado'         ? 'Marcar Recuperada' :
+                                                                     merged.etapaGestion === 'perdido_definitivo' ? 'Marcar Perdida' :
+                                                                     esFinal                                      ? 'Cerrar Gestion' :
+                                                                     'Guardar Gestion'}
+                                                                </button>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Resumen si ya cerrada */}
+                                                        {rec.recuperada && (
+                                                            <div className="xl:text-right min-w-[160px]">
+                                                                <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Gestiono</p>
+                                                                <p className="text-sm font-black text-slate-700">{merged.asesorRecupero}</p>
+                                                                {etapaActual && (
+                                                                    <span className={`text-[8px] font-black px-2 py-0.5 rounded-full border ${etapaActual.color} mt-1 inline-block`}>{etapaActual.label}</span>
+                                                                )}
+                                                                <p className="text-[8px] text-slate-400 mt-1">{merged.notaRecupero}</p>
+                                                                {rec.fechaRecupero && <p className="text-[8px] text-slate-300 mt-1">{new Date(rec.fechaRecupero).toLocaleDateString('es-ES')}</p>}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+
+                        </div>
+                    )}
                 </div>
             );
         };
@@ -1088,4 +2698,3 @@
     </script>
 </body>
 </html>
-
